@@ -56,6 +56,7 @@ logs:
     "msg": "request completed",
     "service": "accounts",
     "duration": 50400000,
+    "event_count": 3,
     "events": [
         {"offset_us": 5, "level": "INFO", "msg": "request started", "method": "GET"},
         {"offset_us": 25000, "level": "INFO", "msg": "user loaded", "user_id": 42},

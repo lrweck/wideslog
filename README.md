@@ -61,6 +61,7 @@ You get a single structured record containing the entire operation. The root
   "request_id": "abc",
   "tenant_id": "123",
   "duration": 17000000,
+  "event_count": 3,
   "events": [
     {
       "offset_us": 1200,
@@ -493,6 +494,11 @@ If you want every individual log line to be independently searchable and indepen
 
 If you want **one complete record describing what happened during an operation**, that's where `wideslog` shines.
 
+## Inspiration
+
+`wideslog` is inspired by [Wide Events](https://lfdubiela.github.io/wide-events/),
+written by my friend [Luiz Dubiela](https://github.com/lfdubiela).
+
 ## Status
 
 🚧 Early-stage / experimental.
@@ -501,4 +507,4 @@ The API may change while the project evolves.
 
 ## License
 
-[Add license here]
+This project is licensed under the [MIT License](LICENSE).

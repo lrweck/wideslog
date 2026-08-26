@@ -171,7 +171,7 @@ func (e *Event) End(
 
 	e.ended = true
 
-	rootAttrs := make([]slog.Attr, 0, len(e.attrs)+len(attrs)+2)
+	rootAttrs := make([]slog.Attr, 0, len(e.attrs)+len(attrs)+3)
 	rootAttrs = append(rootAttrs, e.attrs...)
 	rootAttrs = append(rootAttrs, attrs...)
 
@@ -182,6 +182,7 @@ func (e *Event) End(
 		rootAttrs,
 		slog.Time("timestamp", start),
 		slog.Duration("duration", time.Since(start)),
+		slog.Int("event_count", len(events)),
 	)
 
 	e.mu.Unlock()

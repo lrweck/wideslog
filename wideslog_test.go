@@ -78,6 +78,9 @@ func TestNestedWithGroup(t *testing.T) {
 	}
 
 	root := decodeLog(t, &buf)
+	if root["event_count"] != float64(1) {
+		t.Fatalf("unexpected event count: %#v", root["event_count"])
+	}
 	got := root["events"].([]any)[0].(map[string]any)
 
 	customer := got["customer"].(map[string]any)

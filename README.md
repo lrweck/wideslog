@@ -1,486 +1,252 @@
 # wideslog
 
-> Wide events for Go, built on top of `log/slog`.
+Wide events for Go, built on top of [`log/slog`](https://pkg.go.dev/log/slog).
 
-## Are you tired of...
+`wideslog` collects the logs produced during one operation and emits them as a
+single structured record. The operation context stays explicit, while the
+logger keeps normal `slog` behavior such as `With`, `WithGroup`, and
+`InfoContext`.
 
-- Scrolling through hundreds of log lines just to understand a single request?
-- Repeating `request_id`, `tenant_id`, `user_id` and other context on every log entry?
-- Correlating dozens of independent log records just to reconstruct what happened?
-- Paying to ingest and store the same context over and over again?
-- Choosing between useful application logs and an ever-growing logging bill?
+## Why wide events?
 
-### Meet wideslog.
-
-`wideslog` turns all the logs generated during an operation into a single **wide event**.
-
-## Fewer lines, fewer repeated bytes
-
-Traditional logging emits one record for every step. A five-step operation
-therefore produces five log lines, often repeating the same request context.
-`wideslog` emits one root record and keeps the steps inside `events`:
-
-| | Records | Lines | Shared request context |
-| --- | ---: | ---: | --- |
-| Standard `slog` | 5 | 5 | repeated in each record |
-| `wideslog` | 1 | 1 | written once at the root |
-
-The byte reduction depends on the attributes, JSON handler options, and log
-transport. `wideslog` reduces bytes when shared context is moved to the root;
-the `events` array itself adds a small amount of JSON structure. Measure both
-forms with the same handler and representative payloads.
-
-For a quick local comparison, write each version to its own file and measure
-the serialized output:
-
-```sh
-wc -l -c standard.log wide-event.log
-```
-
-Compare the same operation, the same attributes, and the same handler options.
-The useful comparison is the total bytes and lines emitted per operation, not
-the size of an individual event object.
-
-Instead of scattering a request across multiple log entries:
+Traditional logging emits one record per step and repeats request context:
 
 ```text
-INFO request started
-INFO customer loaded      customer_id=456
-INFO debt loaded          debt_id=789
-INFO negotiation created  installments=12
-INFO request completed
+INFO request started       request_id=req-123 tenant_id=tenant-42
+INFO customer loaded       request_id=req-123 tenant_id=tenant-42 customer_id=456
+INFO debt loaded           request_id=req-123 tenant_id=tenant-42 debt_id=789
+INFO request completed     request_id=req-123 tenant_id=tenant-42
 ```
 
-You get a single structured record containing the entire operation. The root
-`timestamp` is always present; timestamp options apply only to items in
-`events`:
+A wide event writes the shared context once and keeps the steps together:
 
 ```json
 {
   "timestamp": "2026-08-26T20:31:42.100Z",
-  "request_id": "abc",
-  "tenant_id": "123",
   "duration": 17000000,
   "event_count": 3,
+  "request_id": "req-123",
+  "tenant_id": "tenant-42",
   "events": [
-    {
-      "offset_us": 1200,
-      "level": "INFO",
-      "msg": "customer loaded",
-      "customer_id": "456"
-    },
-    {
-      "offset_us": 5800,
-      "level": "INFO",
-      "msg": "debt loaded",
-      "debt_id": "789"
-    },
-    {
-      "offset_us": 17000,
-      "level": "INFO",
-      "msg": "negotiation created",
-      "installments": 12
-    }
+    {"offset_us": 0, "level": "INFO", "msg": "request started"},
+    {"offset_us": 1200, "level": "INFO", "msg": "customer loaded", "customer_id": 456},
+    {"offset_us": 5800, "level": "INFO", "msg": "debt loaded", "debt_id": 789}
   ]
 }
 ```
 
-The context can be attached hierarchically with `slog.With()`, so attributes only appear in the events where they actually apply.
+The root `timestamp` is always emitted. Timestamp options affect only the
+items inside `events`.
 
-**One operation. One log entry. All the context.**
+## Savings model
 
-And because `wideslog` is built on `slog`, context remains hierarchical:
+The following simulations use compact JSON, one trailing newline per record,
+and raw UTF-8 bytes before compression, indexing, retention, or transport
+overhead. Standard logs repeat shared fields on every event. Wide logs put
+shared fields at the root and store only event-specific data in `events`.
 
-```go
-customerLogger := logger.With("customer_id", customerID)
+### Payloads
 
-customerLogger.InfoContext(ctx, "customer loaded")
+API read, five events at 100 requests per second:
 
-debtLogger := customerLogger.With("debt_id", debtID)
-
-debtLogger.InfoContext(ctx, "debt loaded")
-
-debtLogger.InfoContext(ctx, "negotiation created",
-    "installments", 12,
-)
+```json
+{"time":"2026-08-26T20:31:42.100Z","level":"INFO","msg":"step 1","service":"accounts","request_id":"req-123456","tenant_id":"tenant-42","user_id":123456}
+{"time":"2026-08-26T20:31:42.101Z","level":"INFO","msg":"step 2","service":"accounts","request_id":"req-123456","tenant_id":"tenant-42","user_id":123456}
+{"time":"2026-08-26T20:31:42.102Z","level":"INFO","msg":"step 3","service":"accounts","request_id":"req-123456","tenant_id":"tenant-42","user_id":123456}
+{"time":"2026-08-26T20:31:42.103Z","level":"INFO","msg":"step 4","service":"accounts","request_id":"req-123456","tenant_id":"tenant-42","user_id":123456}
+{"time":"2026-08-26T20:31:42.104Z","level":"INFO","msg":"step 5","service":"accounts","request_id":"req-123456","tenant_id":"tenant-42","user_id":123456}
 ```
 
-`customer_id` is automatically included in events produced by `customerLogger` and its children. `debt_id` is included only from `debtLogger` downward.
+The equivalent wide payload is:
 
-
-## Why wideslog?
-
-### Less noise
-
-A single request can generate dozens of log entries. `wideslog` collects them into one structured record.
-
-### Less duplication
-
-Request-level context belongs at the request level. It doesn't need to be repeated in every event.
-
-Put shared context on the root with `Event.Add`:
-
-```go
-ctx, event := wideslog.Start(ctx, logger)
-event.Add(
-  slog.String("request_id", requestID),
-  slog.String("tenant_id", tenantID),
-)
-
-logger.InfoContext(ctx, "customer loaded", "customer_id", customerID)
-logger.InfoContext(ctx, "debt loaded", "debt_id", debtID)
-
-if err := event.End(ctx, slog.LevelInfo, "request completed"); err != nil {
-  return err
-}
+```json
+{"timestamp":"2026-08-26T20:31:42.100Z","duration":17000000,"event_count":5,"service":"accounts","request_id":"req-123456","tenant_id":"tenant-42","user_id":123456,"events":[{"offset_us":0,"level":"INFO","msg":"step 1"},{"offset_us":1200,"level":"INFO","msg":"step 2"},{"offset_us":2400,"level":"INFO","msg":"step 3"},{"offset_us":3600,"level":"INFO","msg":"step 4"},{"offset_us":4800,"level":"INFO","msg":"step 5"}]}
 ```
 
-The request and tenant identifiers are serialized once, instead of being
-repeated on every event. Event-specific attributes remain on their own event.
-
-### Better observability
-
-Instead of reconstructing a request from scattered log lines, you get the entire execution as one document.
-
-### Performance timing built in
-
-Events can use relative offsets instead of repeating full timestamps:
+The other simulated payload inputs are:
 
 ```json
 {
-  "offset_us": 1200,
-  "msg": "customer loaded"
+  "checkout": {
+    "events": 20,
+    "throughput_per_second": 25,
+    "shared": {
+      "service": "checkout",
+      "request_id": "req-123456",
+      "tenant_id": "tenant-42",
+      "user_id": 123456,
+      "order_id": "order-987654"
+    }
+  },
+  "background_worker": {
+    "events": 8,
+    "throughput_per_second": 5,
+    "shared": {
+      "service": "billing-worker",
+      "job_id": "job-123456",
+      "tenant_id": "tenant-42",
+      "attempt": 2
+    }
+  }
 }
 ```
 
-Want absolute timestamps instead? That's configurable too.
+### Per-operation savings
 
-### It's still `slog`
+| Scenario | Events | Throughput | Standard | `wideslog` | Byte savings |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| API read | 5 | 100 req/s | 770 B | 418 B | 45.7% |
+| Checkout | 20 | 25 req/s | 3,611 B | 1,202 B | 66.7% |
+| Background worker | 8 | 5 jobs/s | 1,208 B | 562 B | 53.5% |
 
-You don't need to learn a new logging API.
+### Volume projections
 
-This:
+Assumptions: 86,400 seconds per day, 30 days per month, and 365 days per
+year. `GB` and `TB` are decimal units.
 
-```go
-slog.InfoContext(ctx, "customer loaded",
-    "customer_id", customerID,
-)
-```
+| Scenario | Period | Standard | `wideslog` | Bytes saved |
+| --- | --- | ---: | ---: | ---: |
+| API read | day | 6.65 GB | 3.61 GB | 3.04 GB |
+| API read | month | 199.58 GB | 108.35 GB | 91.24 GB |
+| API read | year | 2.43 TB | 1.32 TB | 1.11 TB |
+| Checkout | day | 7.80 GB | 2.60 GB | 5.20 GB |
+| Checkout | month | 233.99 GB | 77.89 GB | 156.10 GB |
+| Checkout | year | 2.85 TB | 947.66 GB | 1.90 TB |
+| Background worker | day | 0.52 GB | 0.24 GB | 0.28 GB |
+| Background worker | month | 15.66 GB | 7.28 GB | 8.37 GB |
+| Background worker | year | 190.48 GB | 88.62 GB | 101.86 GB |
 
-still works.
-
-`wideslog` is a `slog.Handler`.
-
-That means you keep the familiar `slog` ecosystem, including:
-
-- `With`
-- `WithGroup`
-- `InfoContext`
-- `WarnContext`
-- `ErrorContext`
-- structured attributes
-- custom `slog.Handler`s
-
-## How it works
-
-At the beginning of an operation, create a wide event:
-
-```go
-ctx, event := wideslog.Start(ctx, logger)
-```
-
-From that point on, any `slog` call using that context is captured:
-
-```go
-slog.InfoContext(ctx, "customer loaded",
-    "customer_id", customerID,
-)
-
-slog.InfoContext(ctx, "debt loaded",
-    "debt_id", debtID,
-)
-```
-
-At the end:
-
-```go
-event.End(ctx, slog.LevelInfo, "request completed")
-```
-
-And `wideslog` emits a single structured log entry containing the entire operation.
-
-## `With` still works the way you expect
-
-`wideslog` preserves `slog`'s hierarchical logger semantics.
-
-```go
-customerLogger := logger.With(
-    "customer_id", customerID,
-)
-
-customerLogger.InfoContext(ctx, "customer loaded")
-
-logger.InfoContext(ctx, "something else")
-```
-
-Only the first event receives `customer_id`.
-
-This:
+Line reduction is direct: `events per operation` standard records become one
+wide record. Savings vary with event count, field sizes, handler options, and
+backend compression. The basic calculations are:
 
 ```text
-logger
-  │
-  ├── Info("A")
-  │
-  └── With(customer_id)
-        │
-        ├── Info("B")
-        └── With(debt_id)
-              │
-              └── Info("C")
+bytes saved = (standard bytes/operation - wide bytes/operation) * operations
+lines saved = (events/operation - 1) * operations
 ```
 
-becomes:
+## Quick start
 
-```json
-{
-  "events": [
-    {
-      "msg": "A"
-    },
-    {
-      "msg": "B",
-      "customer_id": "123"
-    },
-    {
-      "msg": "C",
-      "customer_id": "123",
-      "debt_id": "456"
-    }
-  ]
-}
-```
-
-No magic. Just normal `slog` semantics.
-
-## Timestamp modes
-
-Choose how timing is represented for each buffered event. The root event always
-includes `timestamp` and `duration`; these options do not remove or change the
-root timestamp.
-
-### No timestamp
+Create a normal `slog` handler and wrap it once during application startup:
 
 ```go
-ctx, event := wideslog.Start(ctx, logger,
-    wideslog.WithTimestampMode(wideslog.TimestampNone),
-)
-logger.InfoContext(ctx, "customer loaded")
-event.End(ctx, slog.LevelInfo, "completed")
-```
-
-```json
-{
-  "msg": "customer loaded"
-}
-```
-
-### Absolute timestamp
-
-```go
-ctx, event := wideslog.Start(ctx, logger,
-  wideslog.WithTimestampMode(wideslog.TimestampAbsolute),
-)
-logger.InfoContext(ctx, "customer loaded")
-event.End(ctx, slog.LevelInfo, "completed")
-```
-
-```json
-{
-  "timestamp": "2026-08-26T20:31:42.101Z",
-  "msg": "customer loaded"
-}
-```
-
-### Relative offset
-
-```go
-ctx, event := wideslog.Start(ctx, logger,
-  wideslog.WithTimestampMode(wideslog.TimestampOffset),
-  wideslog.WithOffsetUnit(wideslog.OffsetMicroseconds),
-)
-logger.InfoContext(ctx, "customer loaded")
-event.End(ctx, slog.LevelInfo, "completed")
-```
-
-```json
-{
-  "offset_us": 1200,
-  "msg": "customer loaded"
-}
-```
-
-Offsets can be expressed in:
-
-```go
-wideslog.OffsetNanoseconds
-wideslog.OffsetMicroseconds
-wideslog.OffsetMilliseconds
-```
-
-The default is **microseconds**.
-
-For example, with `OffsetMilliseconds`, a pause between two logs can produce:
-
-```json
-{
-  "timestamp": "2026-08-26T20:31:42.100Z",
-  "duration": 25000000,
-  "events": [
-    {"offset_ms": 0, "level": "INFO", "msg": "started"},
-    {"offset_ms": 25, "level": "INFO", "msg": "finished"}
-  ]
-}
-```
-
-## Getting started
-
-Create your normal `slog` handler:
-
-```go
-handler := slog.NewJSONHandler(
-    os.Stdout,
-    &slog.HandlerOptions{
-        Level: slog.LevelInfo,
-    },
-)
-```
-
-Wrap it with `wideslog`:
-
-```go
+handler := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+    Level: slog.LevelInfo,
+})
 logger := wideslog.New(handler)
 ```
 
-Start an event:
+For JSON output, use the convenience constructor:
 
 ```go
-ctx, event := wideslog.Start(ctx, logger)
+logger := wideslog.JSONHandler(os.Stdout, nil)
 ```
 
-Use `slog` normally:
+For each request or operation, create a context-local event:
 
 ```go
-logger.InfoContext(ctx, "loading customer")
+func process(ctx context.Context, logger *slog.Logger) error {
+    ctx, event := wideslog.Start(ctx, logger)
+    defer func() {
+        _ = event.End(ctx, slog.LevelInfo, "request completed")
+    }()
 
-// ...
+    event.Add(
+        slog.String("request_id", "req-123"),
+        slog.String("tenant_id", "tenant-42"),
+    )
 
-logger.InfoContext(ctx, "customer loaded",
-    "customer_id", customerID,
-)
-
-// ...
-
-logger.InfoContext(ctx, "debt loaded",
-    "debt_id", debtID,
-)
-```
-
-Finish the event:
-
-```go
-event.End(ctx, slog.LevelInfo, "request completed")
-```
-
-That's it.
-
-## Echo example
-
-`wideslog` works particularly well as an HTTP middleware.
-
-```go
-func LoggingMiddleware(logger *slog.Logger) echo.MiddlewareFunc {
-    return func(next echo.HandlerFunc) echo.HandlerFunc {
-        return func(c echo.Context) error {
-            ctx, event := wideslog.Start(
-                c.Request().Context(),
-                logger,
-            )
-
-            c.SetRequest(
-                c.Request().WithContext(ctx),
-            )
-
-            err := next(c)
-
-            event.End(
-                ctx,
-                slog.LevelInfo,
-                "request completed",
-                slog.Int("http.status", c.Response().Status),
-            )
-
-            return err
-        }
-    }
+    logger.InfoContext(ctx, "customer loaded", "customer_id", 456)
+    logger.InfoContext(ctx, "debt loaded", "debt_id", 789)
+    return nil
 }
 ```
 
-Now your handler, services and repositories can all contribute to the same wide event without passing a logger or event object around explicitly.
+`Event.Add` puts attributes on the root. Attributes passed to a log call stay
+on that event. `End` is idempotent, so it is safe to use in a deferred cleanup.
 
-```text
-HTTP middleware
-      │
-      ▼
-  Wide Event
-      │
-      ├── Handler
-      │
-      ├── Service
-      │
-      ├── Repository
-      │
-      └── External API
-             │
-             ▼
-        One log entry
+## Logger hierarchy
+
+`With` and `WithGroup` keep their normal `slog` scope:
+
+```go
+customerLogger := logger.With("customer_id", 456)
+debtLogger := customerLogger.With("debt_id", 789)
+
+customerLogger.InfoContext(ctx, "customer loaded")
+debtLogger.InfoContext(ctx, "debt loaded")
+logger.InfoContext(ctx, "request completed")
 ```
 
-## Why not just use `slog.With`?
+Only the first event receives `customer_id`; the second receives both
+`customer_id` and `debt_id`; the root logger receives neither. Groups become
+nested objects:
 
-`slog.With` is great for attaching context to a logger.
-
-But it doesn't solve the problem of **correlating an entire operation**.
-
-With traditional logging:
-
-```text
-log 1 ─────┐
-log 2 ─────┤
-log 3 ─────┼── request_id ──> reconstruct the request
-log 4 ─────┤
-log 5 ─────┘
+```go
+httpLogger := logger.WithGroup("http")
+httpLogger.InfoContext(ctx, "request", "method", "GET", "status", 200)
 ```
 
-With `wideslog`:
+Logs without an active event pass through immediately to the wrapped handler.
+The logger can be shared globally, but the event context must be created once
+per request or operation.
 
-```text
-             ┌─────────────────────┐
-             │     Wide Event      │
-             │                     │
-             │  request metadata   │
-             │  event 1            │
-             │  event 2            │
-             │  event 3            │
-             │  event 4            │
-             └─────────────────────┘
+## Timestamp modes
+
+The root record always includes `timestamp` and `duration`. Configure only the
+per-event timestamp representation when calling `Start`:
+
+```go
+wideslog.WithTimestampMode(wideslog.TimestampNone)
+// events have no individual timestamp
+
+wideslog.WithTimestampMode(wideslog.TimestampAbsolute)
+// events have a timestamp field
+
+wideslog.WithTimestampMode(wideslog.TimestampOffset)
+// events have offset_ns, offset_us, or offset_ms
 ```
 
-The correlation happens **before the log leaves your application**.
+The default is `TimestampOffset` with `OffsetMicroseconds`:
 
-## When should you use it?
+```go
+ctx, event := wideslog.Start(ctx, logger,
+    wideslog.WithTimestampMode(wideslog.TimestampOffset),
+    wideslog.WithOffsetUnit(wideslog.OffsetMilliseconds),
+)
 
-`wideslog` is particularly useful when an operation naturally has a lifecycle:
+logger.InfoContext(ctx, "started")
+time.Sleep(25 * time.Millisecond)
+logger.InfoContext(ctx, "finished")
+_ = event.End(ctx, slog.LevelInfo, "completed")
+```
+
+## HTTP middleware
+
+Create the event from the request context and pass the returned context
+forward. Each request receives an independent event:
+
+```go
+func loggingMiddleware(logger *slog.Logger, next http.Handler) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        ctx, event := wideslog.Start(r.Context(), logger)
+        defer func() {
+            _ = event.End(ctx, slog.LevelInfo, "request completed",
+                slog.Int("http.status", 200),
+            )
+        }()
+
+        next.ServeHTTP(w, r.WithContext(ctx))
+    })
+}
+```
+
+Do not reuse an event across requests. A shared logger is safe; request state is
+stored in the context and the `Event`.
+
+## When to use it
+
+Use wide events for operations with a clear lifecycle:
 
 - HTTP requests
 - background jobs
@@ -488,11 +254,19 @@ The correlation happens **before the log leaves your application**.
 - scheduled tasks
 - workflows
 - database operations
-- asynchronous jobs
 
-If you want every individual log line to be independently searchable and independently indexed, traditional `slog` may be a better fit.
+Traditional `slog` may be a better fit when every log line must be independently
+searchable, or when work runs for a very long time without useful checkpoints.
+A wide event is a summary of an operation, not a replacement for traces or
+fine-grained debugging logs.
 
-If you want **one complete record describing what happened during an operation**, that's where `wideslog` shines.
+## Example
+
+See [example/README.md](example/README.md) and run:
+
+```sh
+go run ./example
+```
 
 ## Inspiration
 
@@ -501,9 +275,7 @@ written by my friend [Luiz Dubiela](https://github.com/lfdubiela).
 
 ## Status
 
-🚧 Early-stage / experimental.
-
-The API may change while the project evolves.
+Early-stage and experimental. The API may change while the project evolves.
 
 ## License
 

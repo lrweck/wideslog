@@ -23,7 +23,7 @@ A real checkout request may produce these seven standard JSON records:
 The equivalent `wideslog` output is one JSON record:
 
 ```json
-{"timestamp":"2026-08-26T20:31:42.100Z","duration":84000000,"event_count":7,"service":"checkout-api","request_id":"req_01J8X7","tenant_id":"tenant_acme","user_id":"usr_9021","order_id":"ord_8F31A2","events":[{"offset_ms":0,"level":"INFO","msg":"request received","method":"POST","path":"/v1/orders/ord_8F31A2"},{"offset_ms":12,"level":"INFO","msg":"customer loaded","customer_id":"cus_42A19C"},{"offset_ms":24,"level":"INFO","msg":"order loaded","items":3,"total_cents":12990},{"offset_ms":36,"level":"INFO","msg":"inventory reserved","warehouse":"sp_01","items":3},{"offset_ms":48,"level":"INFO","msg":"payment authorized","authorization_id":"auth_7D91","amount_cents":12990},{"offset_ms":60,"level":"INFO","msg":"order persisted","status":"confirmed"},{"offset_ms":72,"level":"INFO","msg":"response sent","status":201}]}
+{"timestamp":"2026-08-26T20:31:42.100Z","duration_ms":84,"event_count":7,"service":"checkout-api","request_id":"req_01J8X7","tenant_id":"tenant_acme","user_id":"usr_9021","order_id":"ord_8F31A2","events":[{"offset_ms":0,"level":"INFO","msg":"request received","method":"POST","path":"/v1/orders/ord_8F31A2"},{"offset_ms":12,"level":"INFO","msg":"customer loaded","customer_id":"cus_42A19C"},{"offset_ms":24,"level":"INFO","msg":"order loaded","items":3,"total_cents":12990},{"offset_ms":36,"level":"INFO","msg":"inventory reserved","warehouse":"sp_01","items":3},{"offset_ms":48,"level":"INFO","msg":"payment authorized","authorization_id":"auth_7D91","amount_cents":12990},{"offset_ms":60,"level":"INFO","msg":"order persisted","status":"confirmed"},{"offset_ms":72,"level":"INFO","msg":"response sent","status":201}]}
 ```
 
 The seven standard records become one line. Request metadata is written once,
@@ -45,7 +45,7 @@ A payment worker can use the same shape:
 With `wideslog`, those six records become:
 
 ```json
-{"timestamp":"2026-08-26T20:31:42.100Z","duration":84000000,"event_count":6,"service":"payment-worker","job_id":"job_01J8Y8","queue":"payments.confirmed","attempt":1,"events":[{"offset_ms":0,"level":"INFO","msg":"message received","queue":"payments.confirmed"},{"offset_ms":12,"level":"INFO","msg":"payload decoded","schema_version":3},{"offset_ms":24,"level":"INFO","msg":"payment loaded","authorization_id":"auth_7D91"},{"offset_ms":36,"level":"INFO","msg":"invoice persisted","invoice_id":"inv_51C2"},{"offset_ms":48,"level":"INFO","msg":"receipt queued","queue":"receipts.email"},{"offset_ms":60,"level":"INFO","msg":"job completed","result":"success"}]}
+{"timestamp":"2026-08-26T20:31:42.100Z","duration_ms":84,"event_count":6,"service":"payment-worker","job_id":"job_01J8Y8","queue":"payments.confirmed","attempt":1,"events":[{"offset_ms":0,"level":"INFO","msg":"message received","queue":"payments.confirmed"},{"offset_ms":12,"level":"INFO","msg":"payload decoded","schema_version":3},{"offset_ms":24,"level":"INFO","msg":"payment loaded","authorization_id":"auth_7D91"},{"offset_ms":36,"level":"INFO","msg":"invoice persisted","invoice_id":"inv_51C2"},{"offset_ms":48,"level":"INFO","msg":"receipt queued","queue":"receipts.email"},{"offset_ms":60,"level":"INFO","msg":"job completed","result":"success"}]}
 ```
 
 ## Savings simulation
@@ -117,7 +117,7 @@ that event. Logs without an active event pass through to the wrapped handler.
 
 ## Timestamp modes
 
-The root record always includes `timestamp` and `duration`. Configure only the
+The root record always includes `timestamp` and `duration_ms`. Configure only the
 fields inside `events`:
 
 ```go

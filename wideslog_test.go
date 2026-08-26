@@ -363,6 +363,12 @@ func TestRootAttributesAndEndAttributes(t *testing.T) {
 	}
 
 	root := decodeLog(t, &buf)
+	if _, ok := root["duration_ms"]; !ok {
+		t.Fatalf("missing root duration_ms: %#v", root)
+	}
+	if _, ok := root["duration"]; ok {
+		t.Fatalf("unexpected root duration: %#v", root)
+	}
 	if root["request_id"] != "req-1" {
 		t.Fatalf("unexpected request_id: %#v", root["request_id"])
 	}

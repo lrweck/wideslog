@@ -181,7 +181,7 @@ func (e *Event) End(
 	rootAttrs = append(
 		rootAttrs,
 		slog.Time("timestamp", start),
-		slog.Duration("duration", time.Since(start)),
+		slog.Int64("duration_ms", time.Since(start).Milliseconds()),
 		slog.Int("event_count", len(events)),
 	)
 

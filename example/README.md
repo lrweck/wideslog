@@ -55,7 +55,7 @@ logs:
     "timestamp": "2026-08-26T20:31:42.100Z",
     "msg": "request completed",
     "service": "accounts",
-    "duration": 50400000,
+    "duration_ms": 50,
     "event_count": 3,
     "events": [
         {"offset_us": 5, "level": "INFO", "msg": "request started", "method": "GET"},
@@ -66,8 +66,8 @@ logs:
 ```
 
 The root `timestamp` is always present and marks when the wide event started.
-The exact timestamps and durations vary on every run. `duration` is encoded by
-`slog.Duration` in nanoseconds.
+The exact timestamps and durations vary on every run. `duration_ms` is the
+elapsed root-event duration in milliseconds.
 
 ### Scoped attributes
 

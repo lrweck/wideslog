@@ -2,132 +2,82 @@
 
 Wide events for Go, built on top of [`log/slog`](https://pkg.go.dev/log/slog).
 
-`wideslog` collects the logs produced during one operation and emits them as a
-single structured record. The operation context stays explicit, while the
-logger keeps normal `slog` behavior such as `With`, `WithGroup`, and
-`InfoContext`.
+`wideslog` collects logs from one operation and emits one structured record.
+Shared context is written once at the root; individual steps remain available
+inside `events`.
 
-## Why wide events?
+## Checkout example
 
-Traditional logging emits one record per step and repeats request context:
-
-```text
-INFO request started       request_id=req-123 tenant_id=tenant-42
-INFO customer loaded       request_id=req-123 tenant_id=tenant-42 customer_id=456
-INFO debt loaded           request_id=req-123 tenant_id=tenant-42 debt_id=789
-INFO request completed     request_id=req-123 tenant_id=tenant-42
-```
-
-A wide event writes the shared context once and keeps the steps together:
+A real checkout request may produce these seven standard JSON records:
 
 ```json
-{
-  "timestamp": "2026-08-26T20:31:42.100Z",
-  "duration": 17000000,
-  "event_count": 3,
-  "request_id": "req-123",
-  "tenant_id": "tenant-42",
-  "events": [
-    {"offset_us": 0, "level": "INFO", "msg": "request started"},
-    {"offset_us": 1200, "level": "INFO", "msg": "customer loaded", "customer_id": 456},
-    {"offset_us": 5800, "level": "INFO", "msg": "debt loaded", "debt_id": 789}
-  ]
-}
+{"time":"2026-08-26T20:31:42.100Z","level":"INFO","msg":"request received","service":"checkout-api","request_id":"req_01J8X7","tenant_id":"tenant_acme","user_id":"usr_9021","order_id":"ord_8F31A2","method":"POST","path":"/v1/orders/ord_8F31A2"}
+{"time":"2026-08-26T20:31:42.101Z","level":"INFO","msg":"customer loaded","service":"checkout-api","request_id":"req_01J8X7","tenant_id":"tenant_acme","user_id":"usr_9021","order_id":"ord_8F31A2","customer_id":"cus_42A19C"}
+{"time":"2026-08-26T20:31:42.102Z","level":"INFO","msg":"order loaded","service":"checkout-api","request_id":"req_01J8X7","tenant_id":"tenant_acme","user_id":"usr_9021","order_id":"ord_8F31A2","items":3,"total_cents":12990}
+{"time":"2026-08-26T20:31:42.103Z","level":"INFO","msg":"inventory reserved","service":"checkout-api","request_id":"req_01J8X7","tenant_id":"tenant_acme","user_id":"usr_9021","order_id":"ord_8F31A2","warehouse":"sp_01","items":3}
+{"time":"2026-08-26T20:31:42.104Z","level":"INFO","msg":"payment authorized","service":"checkout-api","request_id":"req_01J8X7","tenant_id":"tenant_acme","user_id":"usr_9021","order_id":"ord_8F31A2","authorization_id":"auth_7D91","amount_cents":12990}
+{"time":"2026-08-26T20:31:42.105Z","level":"INFO","msg":"order persisted","service":"checkout-api","request_id":"req_01J8X7","tenant_id":"tenant_acme","user_id":"usr_9021","order_id":"ord_8F31A2","status":"confirmed"}
+{"time":"2026-08-26T20:31:42.106Z","level":"INFO","msg":"response sent","service":"checkout-api","request_id":"req_01J8X7","tenant_id":"tenant_acme","user_id":"usr_9021","order_id":"ord_8F31A2","status":201}
 ```
 
-The root `timestamp` is always emitted. Timestamp options affect only the
-items inside `events`.
-
-## Savings model
-
-The following simulations use compact JSON, one trailing newline per record,
-and raw UTF-8 bytes before compression, indexing, retention, or transport
-overhead. Standard logs repeat shared fields on every event. Wide logs put
-shared fields at the root and store only event-specific data in `events`.
-
-### Payloads
-
-API read, five events at 100 requests per second:
+The equivalent `wideslog` output is one JSON record:
 
 ```json
-{"time":"2026-08-26T20:31:42.100Z","level":"INFO","msg":"step 1","service":"accounts","request_id":"req-123456","tenant_id":"tenant-42","user_id":123456}
-{"time":"2026-08-26T20:31:42.101Z","level":"INFO","msg":"step 2","service":"accounts","request_id":"req-123456","tenant_id":"tenant-42","user_id":123456}
-{"time":"2026-08-26T20:31:42.102Z","level":"INFO","msg":"step 3","service":"accounts","request_id":"req-123456","tenant_id":"tenant-42","user_id":123456}
-{"time":"2026-08-26T20:31:42.103Z","level":"INFO","msg":"step 4","service":"accounts","request_id":"req-123456","tenant_id":"tenant-42","user_id":123456}
-{"time":"2026-08-26T20:31:42.104Z","level":"INFO","msg":"step 5","service":"accounts","request_id":"req-123456","tenant_id":"tenant-42","user_id":123456}
+{"timestamp":"2026-08-26T20:31:42.100Z","duration":84000000,"event_count":7,"service":"checkout-api","request_id":"req_01J8X7","tenant_id":"tenant_acme","user_id":"usr_9021","order_id":"ord_8F31A2","events":[{"offset_ms":0,"level":"INFO","msg":"request received","method":"POST","path":"/v1/orders/ord_8F31A2"},{"offset_ms":12,"level":"INFO","msg":"customer loaded","customer_id":"cus_42A19C"},{"offset_ms":24,"level":"INFO","msg":"order loaded","items":3,"total_cents":12990},{"offset_ms":36,"level":"INFO","msg":"inventory reserved","warehouse":"sp_01","items":3},{"offset_ms":48,"level":"INFO","msg":"payment authorized","authorization_id":"auth_7D91","amount_cents":12990},{"offset_ms":60,"level":"INFO","msg":"order persisted","status":"confirmed"},{"offset_ms":72,"level":"INFO","msg":"response sent","status":201}]}
 ```
 
-The equivalent wide payload is:
+The seven standard records become one line. Request metadata is written once,
+while event-specific attributes stay with the event that produced them.
+
+## Payment worker example
+
+A payment worker can use the same shape:
 
 ```json
-{"timestamp":"2026-08-26T20:31:42.100Z","duration":17000000,"event_count":5,"service":"accounts","request_id":"req-123456","tenant_id":"tenant-42","user_id":123456,"events":[{"offset_us":0,"level":"INFO","msg":"step 1"},{"offset_us":1200,"level":"INFO","msg":"step 2"},{"offset_us":2400,"level":"INFO","msg":"step 3"},{"offset_us":3600,"level":"INFO","msg":"step 4"},{"offset_us":4800,"level":"INFO","msg":"step 5"}]}
+{"time":"2026-08-26T20:31:42.100Z","level":"INFO","msg":"message received","service":"payment-worker","job_id":"job_01J8Y8","queue":"payments.confirmed","attempt":1}
+{"time":"2026-08-26T20:31:42.101Z","level":"INFO","msg":"payload decoded","service":"payment-worker","job_id":"job_01J8Y8","queue":"payments.confirmed","attempt":1,"schema_version":3}
+{"time":"2026-08-26T20:31:42.102Z","level":"INFO","msg":"payment loaded","service":"payment-worker","job_id":"job_01J8Y8","queue":"payments.confirmed","attempt":1,"authorization_id":"auth_7D91"}
+{"time":"2026-08-26T20:31:42.103Z","level":"INFO","msg":"invoice persisted","service":"payment-worker","job_id":"job_01J8Y8","queue":"payments.confirmed","attempt":1,"invoice_id":"inv_51C2"}
+{"time":"2026-08-26T20:31:42.104Z","level":"INFO","msg":"receipt queued","service":"payment-worker","job_id":"job_01J8Y8","queue":"receipts.email","attempt":1}
+{"time":"2026-08-26T20:31:42.105Z","level":"INFO","msg":"job completed","service":"payment-worker","job_id":"job_01J8Y8","queue":"payments.confirmed","attempt":1,"result":"success"}
 ```
 
-The other simulated payload inputs are:
+With `wideslog`, those six records become:
 
 ```json
-{
-  "checkout": {
-    "events": 20,
-    "throughput_per_second": 25,
-    "shared": {
-      "service": "checkout",
-      "request_id": "req-123456",
-      "tenant_id": "tenant-42",
-      "user_id": 123456,
-      "order_id": "order-987654"
-    }
-  },
-  "background_worker": {
-    "events": 8,
-    "throughput_per_second": 5,
-    "shared": {
-      "service": "billing-worker",
-      "job_id": "job-123456",
-      "tenant_id": "tenant-42",
-      "attempt": 2
-    }
-  }
-}
+{"timestamp":"2026-08-26T20:31:42.100Z","duration":84000000,"event_count":6,"service":"payment-worker","job_id":"job_01J8Y8","queue":"payments.confirmed","attempt":1,"events":[{"offset_ms":0,"level":"INFO","msg":"message received","queue":"payments.confirmed"},{"offset_ms":12,"level":"INFO","msg":"payload decoded","schema_version":3},{"offset_ms":24,"level":"INFO","msg":"payment loaded","authorization_id":"auth_7D91"},{"offset_ms":36,"level":"INFO","msg":"invoice persisted","invoice_id":"inv_51C2"},{"offset_ms":48,"level":"INFO","msg":"receipt queued","queue":"receipts.email"},{"offset_ms":60,"level":"INFO","msg":"job completed","result":"success"}]}
 ```
 
-### Per-operation savings
+## Savings simulation
 
-| Scenario | Events | Throughput | Standard | `wideslog` | Byte savings |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| API read | 5 | 100 req/s | 770 B | 418 B | 45.7% |
-| Checkout | 20 | 25 req/s | 3,611 B | 1,202 B | 66.7% |
-| Background worker | 8 | 5 jobs/s | 1,208 B | 562 B | 53.5% |
+The payloads above were serialized as compact JSON with one trailing newline per
+record. The byte counts are raw UTF-8 output before compression, indexing, or
+transport overhead.
 
-### Volume projections
+| Scenario | Standard | `wideslog` | Throughput | Byte savings |
+| --- | ---: | ---: | ---: | ---: |
+| Checkout API | 7 lines / 1,601 B | 1 line / 823 B | 75 req/s | 48.6% |
+| Payment worker | 6 lines / 1,078 B | 1 line / 659 B | 20 jobs/s | 38.9% |
 
-Assumptions: 86,400 seconds per day, 30 days per month, and 365 days per
-year. `GB` and `TB` are decimal units.
+Using 86,400 seconds per day, 30 days per month, and 365 days per year:
 
 | Scenario | Period | Standard | `wideslog` | Bytes saved |
 | --- | --- | ---: | ---: | ---: |
-| API read | day | 6.65 GB | 3.61 GB | 3.04 GB |
-| API read | month | 199.58 GB | 108.35 GB | 91.24 GB |
-| API read | year | 2.43 TB | 1.32 TB | 1.11 TB |
-| Checkout | day | 7.80 GB | 2.60 GB | 5.20 GB |
-| Checkout | month | 233.99 GB | 77.89 GB | 156.10 GB |
-| Checkout | year | 2.85 TB | 947.66 GB | 1.90 TB |
-| Background worker | day | 0.52 GB | 0.24 GB | 0.28 GB |
-| Background worker | month | 15.66 GB | 7.28 GB | 8.37 GB |
-| Background worker | year | 190.48 GB | 88.62 GB | 101.86 GB |
+| Checkout API | day | 10.37 GB | 5.33 GB | 5.04 GB |
+| Checkout API | month | 311.23 GB | 159.99 GB | 151.24 GB |
+| Checkout API | year | 3.79 TB | 1.95 TB | 1.84 TB |
+| Payment worker | day | 1.86 GB | 1.14 GB | 0.72 GB |
+| Payment worker | month | 55.88 GB | 34.16 GB | 21.72 GB |
+| Payment worker | year | 679.92 GB | 415.64 GB | 264.27 GB |
 
-Line reduction is direct: `events per operation` standard records become one
-wide record. Savings vary with event count, field sizes, handler options, and
-backend compression. The basic calculations are:
-
-```text
-bytes saved = (standard bytes/operation - wide bytes/operation) * operations
-lines saved = (events/operation - 1) * operations
-```
+These are simulations, not universal benchmarks. Savings depend on event count,
+repeated context, field sizes, handler options, compression, and backend
+pricing. The line reduction is deterministic: `n` standard records become one
+wide record per operation.
 
 ## Quick start
 
-Create a normal `slog` handler and wrap it once during application startup:
+Create the logger once during application startup:
 
 ```go
 handler := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
@@ -136,76 +86,51 @@ handler := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 logger := wideslog.New(handler)
 ```
 
-For JSON output, use the convenience constructor:
+Or use the JSON convenience constructor:
 
 ```go
 logger := wideslog.JSONHandler(os.Stdout, nil)
 ```
 
-For each request or operation, create a context-local event:
+Create one event per request or operation:
 
 ```go
 func process(ctx context.Context, logger *slog.Logger) error {
     ctx, event := wideslog.Start(ctx, logger)
     defer func() {
-        _ = event.End(ctx, slog.LevelInfo, "request completed")
+        _ = event.End(ctx, slog.LevelInfo, "operation completed")
     }()
 
     event.Add(
-        slog.String("request_id", "req-123"),
-        slog.String("tenant_id", "tenant-42"),
+        slog.String("request_id", "req_01J8X7"),
+        slog.String("tenant_id", "tenant_acme"),
     )
 
-    logger.InfoContext(ctx, "customer loaded", "customer_id", 456)
-    logger.InfoContext(ctx, "debt loaded", "debt_id", 789)
+    logger.InfoContext(ctx, "customer loaded", "customer_id", "cus_42A19C")
+    logger.InfoContext(ctx, "payment authorized", "amount_cents", 12990)
     return nil
 }
 ```
 
-`Event.Add` puts attributes on the root. Attributes passed to a log call stay
-on that event. `End` is idempotent, so it is safe to use in a deferred cleanup.
-
-## Logger hierarchy
-
-`With` and `WithGroup` keep their normal `slog` scope:
-
-```go
-customerLogger := logger.With("customer_id", 456)
-debtLogger := customerLogger.With("debt_id", 789)
-
-customerLogger.InfoContext(ctx, "customer loaded")
-debtLogger.InfoContext(ctx, "debt loaded")
-logger.InfoContext(ctx, "request completed")
-```
-
-Only the first event receives `customer_id`; the second receives both
-`customer_id` and `debt_id`; the root logger receives neither. Groups become
-nested objects:
-
-```go
-httpLogger := logger.WithGroup("http")
-httpLogger.InfoContext(ctx, "request", "method", "GET", "status", 200)
-```
-
-Logs without an active event pass through immediately to the wrapped handler.
-The logger can be shared globally, but the event context must be created once
-per request or operation.
+`Event.Add` writes root attributes. Attributes passed to a log call remain on
+that event. Logs without an active event pass through to the wrapped handler.
 
 ## Timestamp modes
 
 The root record always includes `timestamp` and `duration`. Configure only the
-per-event timestamp representation when calling `Start`:
+fields inside `events`:
 
 ```go
-wideslog.WithTimestampMode(wideslog.TimestampNone)
-// events have no individual timestamp
-
-wideslog.WithTimestampMode(wideslog.TimestampAbsolute)
-// events have a timestamp field
-
-wideslog.WithTimestampMode(wideslog.TimestampOffset)
-// events have offset_ns, offset_us, or offset_ms
+ctx, event := wideslog.Start(ctx, logger,
+    wideslog.WithTimestampMode(wideslog.TimestampNone),
+)
 ```
+
+Available modes:
+
+- `TimestampNone`: no timestamp on individual events.
+- `TimestampAbsolute`: an ISO-8601 `timestamp` on each event.
+- `TimestampOffset`: an elapsed `offset_ns`, `offset_us`, or `offset_ms`.
 
 The default is `TimestampOffset` with `OffsetMicroseconds`:
 
@@ -223,8 +148,7 @@ _ = event.End(ctx, slog.LevelInfo, "completed")
 
 ## HTTP middleware
 
-Create the event from the request context and pass the returned context
-forward. Each request receives an independent event:
+Create the event from the request context and pass the returned context forward:
 
 ```go
 func loggingMiddleware(logger *slog.Logger, next http.Handler) http.Handler {
@@ -241,24 +165,15 @@ func loggingMiddleware(logger *slog.Logger, next http.Handler) http.Handler {
 }
 ```
 
-Do not reuse an event across requests. A shared logger is safe; request state is
+Each request receives its own event. The logger can be shared; request state is
 stored in the context and the `Event`.
 
-## When to use it
+## When not to use it
 
-Use wide events for operations with a clear lifecycle:
-
-- HTTP requests
-- background jobs
-- message processing
-- scheduled tasks
-- workflows
-- database operations
-
-Traditional `slog` may be a better fit when every log line must be independently
-searchable, or when work runs for a very long time without useful checkpoints.
-A wide event is a summary of an operation, not a replacement for traces or
-fine-grained debugging logs.
+Use standard `slog` when each line must be independently searchable or when an
+operation runs for a long time without useful checkpoints. Wide events are a
+summary of an operation, not a replacement for traces or fine-grained debug
+logs.
 
 ## Example
 
@@ -272,10 +187,6 @@ go run ./example
 
 `wideslog` is inspired by [Wide Events](https://lfdubiela.github.io/wide-events/),
 written by my friend [Luiz Dubiela](https://github.com/lfdubiela).
-
-## Status
-
-Early-stage and experimental. The API may change while the project evolves.
 
 ## License
 

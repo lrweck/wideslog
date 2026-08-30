@@ -32,7 +32,7 @@ func plainSlog() {
 func wideEvent() {
 	fmt.Println("--- wideslog: multiple logs in one record ---")
 	logger := wideslog.JSONHandler(os.Stdout, nil)
-	ctx, event := wideslog.Start(context.Background(), logger)
+	ctx, event := wideslog.NewEvent(context.Background(), logger, "request completed")
 	event.Add(slog.String("service", "accounts"))
 
 	logger.InfoContext(ctx, "request started", "method", "GET")
@@ -41,9 +41,7 @@ func wideEvent() {
 	time.Sleep(logPause)
 	logger.WarnContext(ctx, "slow dependency", "dependency", "profile-api")
 
-	if err := event.End(ctx, slog.LevelInfo, "request completed"); err != nil {
-		panic(err)
-	}
+	event.End(ctx)
 }
 
 func timestampModes() {
@@ -56,7 +54,8 @@ func timestampModes() {
 
 func showTimestampMode(name string, mode wideslog.TimestampMode) {
 	logger := wideslog.JSONHandler(os.Stdout, nil)
-	ctx, event := wideslog.Start(context.Background(), logger,
+	ctx, event := wideslog.NewEvent(context.Background(), logger,
+		name+" example",
 		wideslog.WithTimestampMode(mode),
 		wideslog.WithOffsetUnit(wideslog.OffsetMilliseconds),
 	)
@@ -65,7 +64,5 @@ func showTimestampMode(name string, mode wideslog.TimestampMode) {
 	time.Sleep(logPause)
 	logger.LogAttrs(ctx, slog.LevelInfo, "finished", slog.Int("step", 2))
 
-	if err := event.End(ctx, slog.LevelInfo, name+" example completed"); err != nil {
-		panic(err)
-	}
+	event.End(ctx)
 }

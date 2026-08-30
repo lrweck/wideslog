@@ -88,6 +88,7 @@ type Event struct {
 	start  time.Time
 	scoped [][]slog.Attr
 	groups []string
+	msg    string
 	attrs  []slog.Attr
 	events []eventRecord
 	ended  bool
@@ -101,13 +102,23 @@ type eventRecord struct {
 	attrs   []slog.Attr
 }
 
-// Start begins collecting records for a request-scoped wide event.
+// NewEvent begins collecting records for a request-scoped wide event.
 //
-// The returned context contains the Event. Any slog call made with this
-// context is captured by a wideslog Handler.
-func Start(
+// msg identifies the operation and becomes the message of the root wide
+// record. The returned context contains the Event. Any slog call made with
+// this context is captured by a wideslog Handler.
+//
+// NewEvent panics when logger is not backed by a wideslog Handler (use
+// wideslog.New or wideslog.JSONHandler). A logger created with plain slog
+// would silently emit records instead of buffering them.
+//
+// NewEvent must be called on a context without an existing Event. Calling
+// it twice stores the inner event in the context and the outer event stops
+// collecting records.
+func NewEvent(
 	ctx context.Context,
 	logger *slog.Logger,
+	msg string,
 	options ...Option,
 ) (context.Context, *Event) {
 	if ctx == nil {
@@ -120,18 +131,19 @@ func Start(
 
 	handler := logger.Handler()
 
+	wide, ok := handler.(*Handler)
+	if !ok {
+		panic("wideslog: NewEvent requires a logger backed by a wideslog handler")
+	}
+
 	event := &Event{
 		output: unwrap(handler),
 		config: NewConfig(options...),
 		start:  time.Now(),
+		msg:    msg,
 	}
-
-	if wide, ok := handler.(*Handler); ok {
-		event.scoped = wide.attrs
-		event.groups = wide.groups
-	} else {
-		event.scoped = [][]slog.Attr{nil}
-	}
+	event.scoped = wide.attrs
+	event.groups = wide.groups
 
 	return context.WithValue(ctx, contextKey{}, event), event
 }
@@ -162,13 +174,16 @@ func (e *Event) Add(attrs ...slog.Attr) {
 
 // End emits the accumulated wide event.
 //
-// End is idempotent. Only the first call emits the event.
-func (e *Event) End(
-	ctx context.Context,
-	level slog.Level,
-	msg string,
-	attrs ...slog.Attr,
-) error {
+// End is idempotent. Only the first call emits the event, and no error is
+// returned: an output handler that fails to write is treated the same way
+// slog treats handler errors, silently.
+//
+// The root record carries the message passed to NewEvent. Steps logged
+// through the event's context, including the final one, live in the events
+// field. The root record uses the highest level found in the buffered steps
+// (Info when there are none), so handlers that only accept serious levels
+// still receive it.
+func (e *Event) End(ctx context.Context) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -177,14 +192,15 @@ func (e *Event) End(
 
 	if e.ended {
 		e.mu.Unlock()
-		return nil
+		return
 	}
 
 	e.ended = true
 
-	rootAttrs := make([]slog.Attr, 0, len(e.attrs)+len(attrs)+3)
+	msg := e.msg
+
+	rootAttrs := make([]slog.Attr, 0, len(e.attrs)+3)
 	rootAttrs = append(rootAttrs, e.attrs...)
-	rootAttrs = append(rootAttrs, attrs...)
 
 	events := slices.Clone(e.events)
 	start := e.start
@@ -198,8 +214,9 @@ func (e *Event) End(
 
 	e.mu.Unlock()
 
+	level := maxEventLevel(events)
 	if !e.output.Enabled(ctx, level) {
-		return nil
+		return
 	}
 
 	rootAttrs = append(
@@ -210,7 +227,19 @@ func (e *Event) End(
 	record := slog.NewRecord(time.Now(), level, msg, 0)
 	record.AddAttrs(scopedAttrs(e.scoped, e.groups, rootAttrs)...)
 
-	return e.output.Handle(ctx, record)
+	_ = e.output.Handle(ctx, record)
+}
+
+func maxEventLevel(events []eventRecord) slog.Level {
+	level := slog.LevelInfo
+
+	for _, event := range events {
+		if event.level > level {
+			level = event.level
+		}
+	}
+
+	return level
 }
 
 func (e *Event) eventsValue(events []eventRecord) []any {

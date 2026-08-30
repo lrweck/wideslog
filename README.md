@@ -6,77 +6,57 @@ Wide events for Go, built on top of [`log/slog`](https://pkg.go.dev/log/slog).
 Shared context is written once at the root; individual steps remain available
 inside `events`.
 
-## Checkout example
+## Payment API example
 
-A real checkout request may produce these seven standard JSON records:
-
-```json
-{"time":"2026-08-26T20:31:42.100Z","level":"INFO","msg":"request received","service":"checkout-api","request_id":"req_01J8X7","tenant_id":"tenant_acme","user_id":"usr_9021","order_id":"ord_8F31A2","method":"POST","path":"/v1/orders/ord_8F31A2"}
-{"time":"2026-08-26T20:31:42.101Z","level":"INFO","msg":"customer loaded","service":"checkout-api","request_id":"req_01J8X7","tenant_id":"tenant_acme","user_id":"usr_9021","order_id":"ord_8F31A2","customer_id":"cus_42A19C"}
-{"time":"2026-08-26T20:31:42.102Z","level":"INFO","msg":"order loaded","service":"checkout-api","request_id":"req_01J8X7","tenant_id":"tenant_acme","user_id":"usr_9021","order_id":"ord_8F31A2","items":3,"total_cents":12990}
-{"time":"2026-08-26T20:31:42.103Z","level":"INFO","msg":"inventory reserved","service":"checkout-api","request_id":"req_01J8X7","tenant_id":"tenant_acme","user_id":"usr_9021","order_id":"ord_8F31A2","warehouse":"sp_01","items":3}
-{"time":"2026-08-26T20:31:42.104Z","level":"INFO","msg":"payment authorized","service":"checkout-api","request_id":"req_01J8X7","tenant_id":"tenant_acme","user_id":"usr_9021","order_id":"ord_8F31A2","authorization_id":"auth_7D91","amount_cents":12990}
-{"time":"2026-08-26T20:31:42.105Z","level":"INFO","msg":"order persisted","service":"checkout-api","request_id":"req_01J8X7","tenant_id":"tenant_acme","user_id":"usr_9021","order_id":"ord_8F31A2","status":"confirmed"}
-{"time":"2026-08-26T20:31:42.106Z","level":"INFO","msg":"response sent","service":"checkout-api","request_id":"req_01J8X7","tenant_id":"tenant_acme","user_id":"usr_9021","order_id":"ord_8F31A2","status":201}
-```
-
-The equivalent `wideslog` output is one JSON record:
+One payment request logs five steps. Each standard slog record repeats the
+full request context (`service`, `request_id`, `tenant_id`, `user_id`):
 
 ```json
-{"timestamp":"2026-08-26T20:31:42.100Z","duration_ms":84,"event_count":7,"service":"checkout-api","request_id":"req_01J8X7","tenant_id":"tenant_acme","user_id":"usr_9021","order_id":"ord_8F31A2","events":[{"offset_ms":0,"level":"INFO","msg":"request received","method":"POST","path":"/v1/orders/ord_8F31A2"},{"offset_ms":12,"level":"INFO","msg":"customer loaded","customer_id":"cus_42A19C"},{"offset_ms":24,"level":"INFO","msg":"order loaded","items":3,"total_cents":12990},{"offset_ms":36,"level":"INFO","msg":"inventory reserved","warehouse":"sp_01","items":3},{"offset_ms":48,"level":"INFO","msg":"payment authorized","authorization_id":"auth_7D91","amount_cents":12990},{"offset_ms":60,"level":"INFO","msg":"order persisted","status":"confirmed"},{"offset_ms":72,"level":"INFO","msg":"response sent","status":201}]}
+{"time":"2026-08-30T09:15:42.100Z","level":"INFO","msg":"request received","service":"payments-api","request_id":"req_01J9Y7K2","tenant_id":"tenant_acme","user_id":"usr_4821","method":"POST","path":"/v1/payments"}
+{"time":"2026-08-30T09:15:42.101Z","level":"INFO","msg":"customer loaded","service":"payments-api","request_id":"req_01J9Y7K2","tenant_id":"tenant_acme","user_id":"usr_4821","customer_id":"cus_42A19C","customer_plan":"pro"}
+{"time":"2026-08-30T09:15:42.103Z","level":"INFO","msg":"payment method verified","service":"payments-api","request_id":"req_01J9Y7K2","tenant_id":"tenant_acme","user_id":"usr_4821","brand":"visa","last4":"4242","risk_score":12}
+{"time":"2026-08-30T09:15:42.105Z","level":"INFO","msg":"payout authorized","service":"payments-api","request_id":"req_01J9Y7K2","tenant_id":"tenant_acme","user_id":"usr_4821","payout_id":"pay_7D91B4","amount_cents":12990,"currency":"BRL"}
+{"time":"2026-08-30T09:15:42.108Z","level":"INFO","msg":"payment completed","service":"payments-api","request_id":"req_01J9Y7K2","tenant_id":"tenant_acme","user_id":"usr_4821","payment_id":"pay_7D91B4","status":"confirmed"}
 ```
 
-The seven standard records become one line. Request metadata is written once,
-while event-specific attributes stay with the event that produced them.
-
-## Payment worker example
-
-A payment worker can use the same shape:
+The same request through `wideslog` emits one record. `NewEvent` names the
+operation on the root; the shared context is written once as root attributes;
+each step keeps only its own fields inside `events`:
 
 ```json
-{"time":"2026-08-26T20:31:42.100Z","level":"INFO","msg":"message received","service":"payment-worker","job_id":"job_01J8Y8","queue":"payments.confirmed","attempt":1}
-{"time":"2026-08-26T20:31:42.101Z","level":"INFO","msg":"payload decoded","service":"payment-worker","job_id":"job_01J8Y8","queue":"payments.confirmed","attempt":1,"schema_version":3}
-{"time":"2026-08-26T20:31:42.102Z","level":"INFO","msg":"payment loaded","service":"payment-worker","job_id":"job_01J8Y8","queue":"payments.confirmed","attempt":1,"authorization_id":"auth_7D91"}
-{"time":"2026-08-26T20:31:42.103Z","level":"INFO","msg":"invoice persisted","service":"payment-worker","job_id":"job_01J8Y8","queue":"payments.confirmed","attempt":1,"invoice_id":"inv_51C2"}
-{"time":"2026-08-26T20:31:42.104Z","level":"INFO","msg":"receipt queued","service":"payment-worker","job_id":"job_01J8Y8","queue":"receipts.email","attempt":1}
-{"time":"2026-08-26T20:31:42.105Z","level":"INFO","msg":"job completed","service":"payment-worker","job_id":"job_01J8Y8","queue":"payments.confirmed","attempt":1,"result":"success"}
+{"time":"2026-08-30T09:15:42.108Z","level":"INFO","msg":"charge payment pay_7D91B4","timestamp":"2026-08-30T09:15:42.100Z","duration_ms":8,"event_count":5,"service":"payments-api","request_id":"req_01J9Y7K2","tenant_id":"tenant_acme","user_id":"usr_4821","events":[{"offset_ms":0,"level":"INFO","msg":"request received","method":"POST","path":"/v1/payments"},{"offset_ms":12,"level":"INFO","msg":"customer loaded","customer_id":"cus_42A19C","customer_plan":"pro"},{"offset_ms":32,"level":"INFO","msg":"payment method verified","brand":"visa","last4":"4242","risk_score":12},{"offset_ms":54,"level":"INFO","msg":"payout authorized","payout_id":"pay_7D91B4","amount_cents":12990,"currency":"BRL"},{"offset_ms":78,"level":"INFO","msg":"payment completed","payment_id":"pay_7D91B4","status":"confirmed"}]}
 ```
 
-With `wideslog`, those six records become:
-
-```json
-{"timestamp":"2026-08-26T20:31:42.100Z","duration_ms":84,"event_count":6,"service":"payment-worker","job_id":"job_01J8Y8","queue":"payments.confirmed","attempt":1,"events":[{"offset_ms":0,"level":"INFO","msg":"message received","queue":"payments.confirmed"},{"offset_ms":12,"level":"INFO","msg":"payload decoded","schema_version":3},{"offset_ms":24,"level":"INFO","msg":"payment loaded","authorization_id":"auth_7D91"},{"offset_ms":36,"level":"INFO","msg":"invoice persisted","invoice_id":"inv_51C2"},{"offset_ms":48,"level":"INFO","msg":"receipt queued","queue":"receipts.email"},{"offset_ms":60,"level":"INFO","msg":"job completed","result":"success"}]}
-```
+Five standard records become one line. Request metadata and the operation name
+are written once, while event-specific attributes stay with the event that
+produced them.
 
 ## Savings simulation
 
-The payloads above were serialized as compact JSON with one trailing newline per
-record. The byte counts are raw UTF-8 output before compression, indexing, or
-transport overhead.
+Serialized as compact JSON with one trailing newline per record, the payment
+request above produces five records of 214, 224, 229, 240, and 224 bytes —
+1,131 B per request. The `wideslog` output is one record of 802 bytes: 329 B
+saved per request (29.1%), before compression, indexing, or transport overhead.
 
-| Scenario | Standard | `wideslog` | Throughput | Byte savings |
-| --- | ---: | ---: | ---: | ---: |
-| Checkout API | 7 lines / 1,601 B | 1 line / 823 B | 75 req/s | 48.6% |
-| Payment worker | 6 lines / 1,078 B | 1 line / 659 B | 20 jobs/s | 38.9% |
+| Scenario | Standard | `wideslog` | Byte savings |
+| --- | ---: | ---: | ---: |
+| Payment API | 5 lines / 1,131 B | 1 line / 802 B | 329 B (29.1%) |
 
-Using 86,400 seconds per day, 30 days per month, and 365 days per year:
+Using 86,400 seconds per day, 30 days per month, and 365 days per year at
+50 requests per second:
 
-| Scenario | Period | Standard | `wideslog` | Bytes saved |
-| --- | --- | ---: | ---: | ---: |
-| Checkout API | day | 10.37 GB | 5.33 GB | 5.04 GB |
-| Checkout API | month | 311.23 GB | 159.99 GB | 151.24 GB |
-| Checkout API | year | 3.79 TB | 1.95 TB | 1.84 TB |
-| Payment worker | day | 1.86 GB | 1.14 GB | 0.72 GB |
-| Payment worker | month | 55.88 GB | 34.16 GB | 21.72 GB |
-| Payment worker | year | 679.92 GB | 415.64 GB | 264.27 GB |
+| Period | Standard | `wideslog` | Bytes saved |
+| --- | ---: | ---: | ---: |
+| day | 4.89 GB | 3.46 GB | 1.42 GB |
+| month | 146.58 GB | 103.94 GB | 42.64 GB |
+| year | 1,783.36 GB | 1,264.59 GB | 518.77 GB |
 
 These are simulations, not universal benchmarks. Savings depend on event count,
 repeated context, field sizes, handler options, compression, and backend
-pricing. The line reduction is deterministic: `n` standard records become one
-wide record per operation. For readability the wide-event samples below omit
-the root `time`, `level`, and `msg` fields that slog always emits (the `msg`
-is whatever operation name you pass to `NewEvent`), so real output is a little
-larger than shown.
+pricing. The line reduction is deterministic: five standard records become one
+wide record per operation. The byte savings come mostly from writing the shared
+request context and the per-line `time`/`level`/`msg` fields only once, at the
+root.
 
 ## Quick start
 

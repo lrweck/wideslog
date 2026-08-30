@@ -33,7 +33,7 @@ with `Event.Add` belong to the final record:
 
 ```go
 logger := wideslog.JSONHandler(os.Stdout, nil)
-ctx, event := wideslog.Start(context.Background(), logger)
+ctx, event := wideslog.NewEvent(context.Background(), logger, "request completed")
 event.Add(slog.String("service", "accounts"))
 
 logger.InfoContext(ctx, "request started", "method", "GET")
@@ -42,13 +42,12 @@ logger.InfoContext(ctx, "user loaded", "user_id", 42)
 time.Sleep(25 * time.Millisecond)
 logger.WarnContext(ctx, "slow dependency", "dependency", "profile-api")
 
-if err := event.End(ctx, slog.LevelInfo, "request completed"); err != nil {
-    panic(err)
-}
+event.End(ctx)
 ```
 
 The final record contains the event attributes, duration, and all buffered
-logs:
+logs. The message passed to `NewEvent` identifies the operation on the root
+record:
 
 ```json
 {
@@ -93,33 +92,33 @@ Choose how timestamps are stored on each buffered log. The default is
 items inside `events`; the root `timestamp` is always emitted:
 
 ```go
-ctx, event := wideslog.Start(context.Background(), logger,
+ctx, event := wideslog.NewEvent(context.Background(), logger, "step completed",
     wideslog.WithTimestampMode(wideslog.TimestampNone),
 )
 
 // No timestamp on individual logs.
 logger.InfoContext(ctx, "step completed")
-event.End(ctx, slog.LevelInfo, "completed")
+event.End(ctx)
 ```
 
 Use `TimestampAbsolute` like this:
 
 ```go
-ctx, event := wideslog.Start(context.Background(), logger,
+ctx, event := wideslog.NewEvent(context.Background(), logger, "step completed",
     wideslog.WithTimestampMode(wideslog.TimestampAbsolute),
 )
 logger.InfoContext(ctx, "step completed")
-event.End(ctx, slog.LevelInfo, "completed")
+event.End(ctx)
 ```
 
 Use `TimestampOffset` like this:
 
 ```go
-ctx, event := wideslog.Start(context.Background(), logger,
+ctx, event := wideslog.NewEvent(context.Background(), logger, "step completed",
     wideslog.WithTimestampMode(wideslog.TimestampOffset),
 )
 logger.InfoContext(ctx, "step completed")
-event.End(ctx, slog.LevelInfo, "completed")
+event.End(ctx)
 ```
 
 The modes produce these per-event fields:
@@ -141,7 +140,7 @@ wideslog.WithOffsetUnit(wideslog.OffsetMilliseconds)
 Example:
 
 ```go
-ctx, event := wideslog.Start(context.Background(), logger,
+ctx, event := wideslog.NewEvent(context.Background(), logger, "step completed",
     wideslog.WithTimestampMode(wideslog.TimestampOffset),
     wideslog.WithOffsetUnit(wideslog.OffsetMilliseconds),
 )
@@ -149,9 +148,7 @@ ctx, event := wideslog.Start(context.Background(), logger,
 logger.InfoContext(ctx, "first step")
 time.Sleep(25 * time.Millisecond)
 logger.InfoContext(ctx, "second step")
-if err := event.End(ctx, slog.LevelInfo, "completed"); err != nil {
-    panic(err)
-}
+event.End(ctx)
 ```
 
 `main.go` runs all of these cases, including standard `slog`, `TimestampNone`,

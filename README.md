@@ -73,7 +73,10 @@ Using 86,400 seconds per day, 30 days per month, and 365 days per year:
 These are simulations, not universal benchmarks. Savings depend on event count,
 repeated context, field sizes, handler options, compression, and backend
 pricing. The line reduction is deterministic: `n` standard records become one
-wide record per operation.
+wide record per operation. For readability the wide-event samples below omit
+the root `time`, `level`, and `msg` fields that slog always emits (the `msg`
+is whatever operation name you pass to `NewEvent`), so real output is a little
+larger than shown.
 
 ## Quick start
 
@@ -96,10 +99,8 @@ Create one event per request or operation:
 
 ```go
 func process(ctx context.Context, logger *slog.Logger) error {
-    ctx, event := wideslog.Start(ctx, logger)
-    defer func() {
-        _ = event.End(ctx, slog.LevelInfo, "operation completed")
-    }()
+    ctx, event := wideslog.NewEvent(ctx, logger, "checkout order "+orderID)
+    defer event.End(ctx)
 
     event.Add(
         slog.String("request_id", "req_01J8X7"),
@@ -112,8 +113,11 @@ func process(ctx context.Context, logger *slog.Logger) error {
 }
 ```
 
-`Event.Add` writes root attributes. Attributes passed to a log call remain on
-that event. Logs without an active event pass through to the wrapped handler.
+The message passed to `NewEvent` identifies the operation and becomes the
+message of the root record. `Event.Add` writes root attributes. Attributes
+passed to a log call remain on that event; steps logged through the logger
+appear as entries in `events`. Logs without an active event pass through to
+the wrapped handler.
 
 ## Timestamp modes
 
@@ -121,10 +125,14 @@ The root record always includes `timestamp` and `duration_ms`. Configure only th
 fields inside `events`:
 
 ```go
-ctx, event := wideslog.Start(ctx, logger,
+ctx, event := wideslog.NewEvent(ctx, logger, "operation completed",
     wideslog.WithTimestampMode(wideslog.TimestampNone),
 )
 ```
+
+`timestamp` marks when the operation started. In the examples above the root
+`time` and `level` fields (which slog always emits) are omitted for readability;
+`time` is when the wide record was written.
 
 Available modes:
 
@@ -135,7 +143,7 @@ Available modes:
 The default is `TimestampOffset` with `OffsetMicroseconds`:
 
 ```go
-ctx, event := wideslog.Start(ctx, logger,
+ctx, event := wideslog.NewEvent(ctx, logger, "operation completed",
     wideslog.WithTimestampMode(wideslog.TimestampOffset),
     wideslog.WithOffsetUnit(wideslog.OffsetMilliseconds),
 )
@@ -143,7 +151,7 @@ ctx, event := wideslog.Start(ctx, logger,
 logger.InfoContext(ctx, "started")
 time.Sleep(25 * time.Millisecond)
 logger.InfoContext(ctx, "finished")
-_ = event.End(ctx, slog.LevelInfo, "completed")
+event.End(ctx)
 ```
 
 ## HTTP middleware
@@ -153,14 +161,11 @@ Create the event from the request context and pass the returned context forward:
 ```go
 func loggingMiddleware(logger *slog.Logger, next http.Handler) http.Handler {
     return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-        ctx, event := wideslog.Start(r.Context(), logger)
-        defer func() {
-            _ = event.End(ctx, slog.LevelInfo, "request completed",
-                slog.Int("http.status", 200),
-            )
-        }()
+        ctx, event := wideslog.NewEvent(r.Context(), logger, "request completed")
+        defer event.End(ctx)
 
         next.ServeHTTP(w, r.WithContext(ctx))
+        event.Add(slog.Int("http.status", 200))
     })
 }
 ```

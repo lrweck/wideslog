@@ -202,7 +202,8 @@ func (e *Event) End(ctx context.Context) {
 	rootAttrs := make([]slog.Attr, 0, len(e.attrs)+3)
 	rootAttrs = append(rootAttrs, e.attrs...)
 
-	events := slices.Clone(e.events)
+	events := e.events
+	e.events = nil
 	start := e.start
 
 	rootAttrs = append(
@@ -246,34 +247,28 @@ func (e *Event) eventsValue(events []eventRecord) []any {
 	values := make([]any, 0, len(events))
 
 	for _, event := range events {
-		attrs := make([]slog.Attr, 0, len(event.attrs)+3)
+		entry := make(map[string]any, len(event.attrs)+3)
 
 		switch e.config.TimestampMode {
 		case TimestampAbsolute:
-			attrs = append(
-				attrs,
-				slog.Time("timestamp", event.time),
-			)
+			entry["timestamp"] = event.time
 
 		case TimestampOffset:
-			attrs = append(
-				attrs,
-				slog.Int64(
-					"offset_"+e.config.OffsetUnit.String(),
-					e.config.OffsetUnit.convert(event.offset),
-				),
-			)
+			entry["offset_"+e.config.OffsetUnit.String()] = e.config.OffsetUnit.convert(event.offset)
 		}
 
-		attrs = append(
-			attrs,
-			slog.String("level", event.level.String()),
-			slog.String("msg", event.message),
-		)
+		entry["level"] = event.level.String()
+		entry["msg"] = event.message
 
-		attrs = append(attrs, event.attrs...)
+		for _, attr := range event.attrs {
+			if attr.Key == "" {
+				continue
+			}
 
-		values = append(values, attrsToMap(attrs))
+			entry[attr.Key] = valueToAny(attr.Value)
+		}
+
+		values = append(values, entry)
 	}
 
 	return values
@@ -364,7 +359,7 @@ func (h *Handler) Handle(
 	// Resolve LogValuer values while the event's context is still active.
 	// This mirrors slog's normal record processing semantics and avoids
 	// storing a LogValuer whose value might change later.
-	attrs = resolveAttrs(attrs)
+	resolveAttrs(attrs)
 
 	event.mu.Lock()
 
@@ -450,6 +445,10 @@ func appendScopedAttrs(scopes [][]slog.Attr, attrs []slog.Attr) [][]slog.Attr {
 }
 
 func scopedAttrs(attrs [][]slog.Attr, groups []string, record []slog.Attr) []slog.Attr {
+	if len(groups) == 0 && len(attrs[0]) == 0 {
+		return record
+	}
+
 	for i, group := range slices.Backward(groups) {
 		groupAttrs := append(slices.Clone(attrs[i+1]), record...)
 		record = []slog.Attr{slog.Group(group, attrsToAny(groupAttrs)...)}
@@ -476,19 +475,10 @@ func attrsToAny(attrs []slog.Attr) []any {
 	return out
 }
 
-func resolveAttrs(
-	attrs []slog.Attr,
-) []slog.Attr {
-	resolved := make([]slog.Attr, 0, len(attrs))
-
-	for _, attr := range attrs {
-		resolved = append(
-			resolved,
-			resolveAttr(attr),
-		)
+func resolveAttrs(attrs []slog.Attr) {
+	for i := range attrs {
+		attrs[i] = resolveAttr(attrs[i])
 	}
-
-	return resolved
 }
 
 func resolveAttr(

@@ -313,6 +313,9 @@ func (h *Handler) Enabled(
 
 // Handle buffers record in the active Event or forwards it to the wrapped
 // handler when no Event exists.
+//
+// Levels the wrapped handler rejects are not buffered; filtering is enforced
+// when the record arrives, matching what slog would do without an Event.
 func (h *Handler) Handle(
 	ctx context.Context,
 	record slog.Record,
@@ -323,12 +326,16 @@ func (h *Handler) Handle(
 		return h.fallback.Handle(ctx, record)
 	}
 
+	if !h.fallback.Enabled(ctx, record.Level) {
+		return nil
+	}
+
 	attrs := scopedAttrs(h.attrs, h.groups, recordAttrs(record))
 
 	// Resolve LogValuer values while the event's context is still active.
 	// This mirrors slog's normal record processing semantics and avoids
 	// storing a LogValuer whose value might change later.
-	attrs = resolveAttrs(ctx, attrs)
+	attrs = resolveAttrs(attrs)
 
 	event.mu.Lock()
 
@@ -441,7 +448,6 @@ func attrsToAny(attrs []slog.Attr) []any {
 }
 
 func resolveAttrs(
-	ctx context.Context,
 	attrs []slog.Attr,
 ) []slog.Attr {
 	resolved := make([]slog.Attr, 0, len(attrs))
@@ -449,7 +455,7 @@ func resolveAttrs(
 	for _, attr := range attrs {
 		resolved = append(
 			resolved,
-			resolveAttr(ctx, attr),
+			resolveAttr(attr),
 		)
 	}
 
@@ -457,18 +463,9 @@ func resolveAttrs(
 }
 
 func resolveAttr(
-	ctx context.Context,
 	attr slog.Attr,
 ) slog.Attr {
 	value := attr.Value.Resolve()
-	if value.Kind() == slog.KindAny {
-		if valuer, ok := value.Any().(slog.LogValuer); ok {
-			return resolveAttr(ctx, slog.Attr{
-				Key:   attr.Key,
-				Value: valuer.LogValue(),
-			})
-		}
-	}
 
 	if value.Kind() != slog.KindGroup {
 		return slog.Attr{
@@ -483,7 +480,7 @@ func resolveAttr(
 	for _, child := range group {
 		resolved = append(
 			resolved,
-			resolveAttr(ctx, child),
+			resolveAttr(child),
 		)
 	}
 

@@ -86,6 +86,8 @@ type Event struct {
 	output slog.Handler
 	config Config
 	start  time.Time
+	scoped [][]slog.Attr
+	groups []string
 	attrs  []slog.Attr
 	events []eventRecord
 	ended  bool
@@ -116,10 +118,19 @@ func Start(
 		logger = slog.Default()
 	}
 
+	handler := logger.Handler()
+
 	event := &Event{
-		output: unwrap(logger.Handler()),
+		output: unwrap(handler),
 		config: NewConfig(options...),
 		start:  time.Now(),
+	}
+
+	if wide, ok := handler.(*Handler); ok {
+		event.scoped = wide.attrs
+		event.groups = wide.groups
+	} else {
+		event.scoped = [][]slog.Attr{nil}
 	}
 
 	return context.WithValue(ctx, contextKey{}, event), event
@@ -187,13 +198,17 @@ func (e *Event) End(
 
 	e.mu.Unlock()
 
+	if !e.output.Enabled(ctx, level) {
+		return nil
+	}
+
 	rootAttrs = append(
 		rootAttrs,
 		slog.Any("events", e.eventsValue(events)),
 	)
 
 	record := slog.NewRecord(time.Now(), level, msg, 0)
-	record.AddAttrs(rootAttrs...)
+	record.AddAttrs(scopedAttrs(e.scoped, e.groups, rootAttrs)...)
 
 	return e.output.Handle(ctx, record)
 }
@@ -308,12 +323,7 @@ func (h *Handler) Handle(
 		return h.fallback.Handle(ctx, record)
 	}
 
-	attrs := recordAttrs(record)
-	for i := len(h.groups) - 1; i >= 0; i-- {
-		groupAttrs := append(slices.Clone(h.attrs[i+1]), attrs...)
-		attrs = []slog.Attr{slog.Group(h.groups[i], attrsToAny(groupAttrs)...)}
-	}
-	attrs = append(slices.Clone(h.attrs[0]), attrs...)
+	attrs := scopedAttrs(h.attrs, h.groups, recordAttrs(record))
 
 	// Resolve LogValuer values while the event's context is still active.
 	// This mirrors slog's normal record processing semantics and avoids
@@ -401,6 +411,14 @@ func appendScopedAttrs(scopes [][]slog.Attr, attrs []slog.Attr) [][]slog.Attr {
 	}
 	result[len(result)-1] = append(result[len(result)-1], attrs...)
 	return result
+}
+
+func scopedAttrs(attrs [][]slog.Attr, groups []string, record []slog.Attr) []slog.Attr {
+	for i, group := range slices.Backward(groups) {
+		groupAttrs := append(slices.Clone(attrs[i+1]), record...)
+		record = []slog.Attr{slog.Group(group, attrsToAny(groupAttrs)...)}
+	}
+	return append(slices.Clone(attrs[0]), record...)
 }
 
 func recordAttrs(record slog.Record) []slog.Attr {

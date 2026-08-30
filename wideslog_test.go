@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 )
@@ -164,7 +165,8 @@ func TestHandlerWithGroup(t *testing.T) {
 	}
 
 	root := decodeLog(t, &buf)
-	got := root["events"].([]any)[0].(map[string]any)
+	rootRequest := root["request"].(map[string]any)
+	got := rootRequest["events"].([]any)[0].(map[string]any)
 	request := got["request"].(map[string]any)
 	if request["method"] != "GET" {
 		t.Fatalf("missing grouped handler attribute: %#v", request)
@@ -474,6 +476,62 @@ func TestEndIsIdempotentAndIgnoresLateAttributes(t *testing.T) {
 	}
 	if _, ok := root["late"]; ok {
 		t.Fatalf("late attribute was emitted: %#v", root)
+	}
+}
+
+func TestEndRespectsHandlerLevel(t *testing.T) {
+	var buf bytes.Buffer
+	logger := New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	_, event := Start(context.Background(), logger)
+	if err := event.End(context.Background(), slog.LevelInfo, "filtered"); err != nil {
+		t.Fatal(err)
+	}
+
+	_, event = Start(context.Background(), logger)
+	if err := event.End(context.Background(), slog.LevelError, "emitted"); err != nil {
+		t.Fatal(err)
+	}
+
+	if lines := strings.Count(buf.String(), "\n"); lines != 1 {
+		t.Fatalf("expected 1 line, got %d: %q", lines, buf.String())
+	}
+	root := decodeLog(t, &buf)
+	if root["msg"] != "emitted" {
+		t.Fatalf("unexpected message: %#v", root["msg"])
+	}
+}
+
+func TestStartLoggerAttrsOnRoot(t *testing.T) {
+	var buf bytes.Buffer
+	logger := New(slog.NewJSONHandler(&buf, nil)).With("service", "accounts")
+
+	ctx, event := Start(context.Background(), logger)
+	logger.InfoContext(ctx, "step")
+	if err := event.End(ctx, slog.LevelInfo, "completed"); err != nil {
+		t.Fatal(err)
+	}
+
+	root := decodeLog(t, &buf)
+	if root["service"] != "accounts" {
+		t.Fatalf("root lost logger attribute: %#v", root)
+	}
+}
+
+func TestStartLoggerGroupOnRoot(t *testing.T) {
+	var buf bytes.Buffer
+	logger := New(slog.NewJSONHandler(&buf, nil)).WithGroup("request").With("method", "GET")
+
+	ctx, event := Start(context.Background(), logger)
+	logger.InfoContext(ctx, "step")
+	if err := event.End(ctx, slog.LevelInfo, "completed"); err != nil {
+		t.Fatal(err)
+	}
+
+	root := decodeLog(t, &buf)
+	request := root["request"].(map[string]any)
+	if request["method"] != "GET" {
+		t.Fatalf("root lost grouped attribute: %#v", root)
 	}
 }
 

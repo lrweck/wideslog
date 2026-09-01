@@ -1,5 +1,7 @@
 # wideslog
 
+[![PkgGoDev](https://pkg.go.dev/badge/github.com/lrweck/wideslog)](https://pkg.go.dev/github.com/lrweck/wideslog)
+
 Wide events for Go, built on top of [`log/slog`](https://pkg.go.dev/log/slog).
 
 `wideslog` collects logs from one operation and emits one structured record.

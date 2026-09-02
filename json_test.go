@@ -99,6 +99,29 @@ func TestMarshalJSONGroupValidated(t *testing.T) {
 	assert.Equal(t, "2", g["a"])
 }
 
+// TestMarshalJSONGroupOrderPreserved pins down that a group's members are
+// written in their original order and that duplicate keys survive, matching
+// the top-level entry behavior rather than round-tripping through a map.
+func TestMarshalJSONGroupOrderPreserved(t *testing.T) {
+	entry := newEntry("step", slog.LevelInfo, TimeNone,
+		slog.Group("g",
+			slog.String("first", "1"),
+			slog.String("dup", "a"),
+			slog.String("dup", "b"),
+			slog.String("last", "2"),
+		),
+	)
+
+	raw := encodeJSON(t, entry)
+	first := strings.Index(raw, `"first":`)
+	dupA := strings.Index(raw, `"dup":"a"`)
+	dupB := strings.Index(raw, `"dup":"b"`)
+	last := strings.Index(raw, `"last":`)
+	require.True(t, first != -1 && dupA != -1 && dupB != -1 && last != -1, "missing keys: %q", raw)
+	assert.True(t, first < dupA && dupA < dupB && dupB < last,
+		"group member order not preserved: %q", raw)
+}
+
 func TestMarshalJSONTimeModes(t *testing.T) {
 	base := eventRecord{
 		time:    time.Date(2026, 8, 30, 9, 15, 42, 0, time.UTC),

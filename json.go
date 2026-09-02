@@ -46,19 +46,24 @@ func (e eventEntry) MarshalJSONTo(enc *jsontext.Encoder) error {
 		return err
 	}
 
-	events := e.record.attrs
-	if events != nil {
-		for _, attr := range *events {
-			attr.Value = attr.Value.Resolve()
-			if attr.Key == "" || reservedEventKey(attr.Key) {
-				continue
-			}
-			if err := writeSlogValue(enc, attr.Key, attr.Value); err != nil {
-				return err
-			}
+	return writeEntryAttrs(enc, e.record.attrs)
+}
+
+// writeEntryAttrs emits the buffered step's attributes, skipping empty and
+// reserved keys. Values are resolved at write time.
+func writeEntryAttrs(enc *jsontext.Encoder, attrs *[]slog.Attr) error {
+	if attrs == nil {
+		return enc.WriteToken(jsontext.EndObject)
+	}
+	for _, attr := range *attrs {
+		attr.Value = attr.Value.Resolve()
+		if attr.Key == "" || reservedEventKey(attr.Key) {
+			continue
+		}
+		if err := writeSlogValue(enc, attr.Key, attr.Value); err != nil {
+			return err
 		}
 	}
-
 	return enc.WriteToken(jsontext.EndObject)
 }
 
@@ -73,12 +78,55 @@ func (v eventsArray) MarshalJSONTo(enc *jsontext.Encoder) error {
 	if err := enc.WriteToken(jsontext.BeginArray); err != nil {
 		return err
 	}
-	for i := range *v.entries {
-		if err := (*v.entries)[i].MarshalJSONTo(enc); err != nil {
+
+	// All entries share one config, so the offset key (and time mode) is
+	// computed once instead of per entry.
+	entries := *v.entries
+	if len(entries) == 0 {
+		return enc.WriteToken(jsontext.EndArray)
+	}
+
+	cfg := entries[0].config
+	offsetKey := ""
+	if cfg.TimeMode == TimeOffset {
+		offsetKey = "offset_" + cfg.OffsetUnit.String()
+	}
+
+	for i := range entries {
+		if err := writeEventEntry(enc, entries[i], offsetKey); err != nil {
 			return err
 		}
 	}
 	return enc.WriteToken(jsontext.EndArray)
+}
+
+// writeEventEntry writes one step object, using a precomputed offset key
+// shared by all entries in the array.
+func writeEventEntry(enc *jsontext.Encoder, e eventEntry, offsetKey string) error {
+	if err := enc.WriteToken(jsontext.BeginObject); err != nil {
+		return err
+	}
+
+	switch e.config.TimeMode {
+	case TimeAbsolute:
+		if err := writeEntryTime(enc, "time", e.record.time); err != nil {
+			return err
+		}
+	case TimeOffset:
+		if err := writeEntryInt(enc, offsetKey,
+			e.config.OffsetUnit.convert(e.record.offset)); err != nil {
+			return err
+		}
+	}
+
+	if err := writeEntryString(enc, "level", e.record.level.String()); err != nil {
+		return err
+	}
+	if err := writeEntryString(enc, "msg", e.record.message); err != nil {
+		return err
+	}
+
+	return writeEntryAttrs(enc, e.record.attrs)
 }
 
 // writeSlogValue emits an object member `key: value` where value is a slog
@@ -113,10 +161,29 @@ func writeValue(enc *jsontext.Encoder, value slog.Value) error {
 	case slog.KindUint64:
 		return writeValueUint(enc, value.Uint64())
 	case slog.KindGroup:
-		return writeAnyWithFormat(enc, attrsToMap(value.Group()))
+		return writeGroupValue(enc, value.Group())
 	default:
 		return writeValueAny(enc, value.Any())
 	}
+}
+
+// writeGroupValue emits a group as a JSON object directly onto the encoder,
+// preserving key order and duplicates and avoiding the map[string]any that
+// handshake with the generic marshaler would otherwise allocate. Nested groups
+// recurse through writeValue.
+func writeGroupValue(enc *jsontext.Encoder, group []slog.Attr) error {
+	if err := enc.WriteToken(jsontext.BeginObject); err != nil {
+		return err
+	}
+	for _, attr := range group {
+		if attr.Key == "" {
+			continue
+		}
+		if err := writeSlogValue(enc, attr.Key, attr.Value); err != nil {
+			return err
+		}
+	}
+	return enc.WriteToken(jsontext.EndObject)
 }
 
 // writeValueAny mirrors slog's JSON handler for arbitrary values: an error is
@@ -159,18 +226,34 @@ func writeValueTime(enc *jsontext.Encoder, t time.Time) error {
 	return enc.WriteValue(b)
 }
 
-// writeEntryString and friends handle the fixed event fields (time/offset,
-// level, msg), which are always present.
+// writeEntryString, writeEntryInt, and writeEntryTime handle the fixed event
+// fields (time/offset, level, msg), which are always present. They write the
+// key/value directly, bypassing a slog.Value round-trip.
+
+// writeMember writes `key:` (the object member name) via the encoder.
+func writeMember(enc *jsontext.Encoder, key string) error {
+	return enc.WriteToken(jsontext.String(key))
+}
+
 func writeEntryString(enc *jsontext.Encoder, key, s string) error {
-	return writeSlogValue(enc, key, slog.StringValue(s))
+	if err := writeMember(enc, key); err != nil {
+		return err
+	}
+	return writeValueString(enc, s)
 }
 
 func writeEntryInt(enc *jsontext.Encoder, key string, n int64) error {
-	return writeSlogValue(enc, key, slog.Int64Value(n))
+	if err := writeMember(enc, key); err != nil {
+		return err
+	}
+	return writeValueInt(enc, n)
 }
 
 func writeEntryTime(enc *jsontext.Encoder, key string, t time.Time) error {
-	return writeSlogValue(enc, key, slog.TimeValue(t))
+	if err := writeMember(enc, key); err != nil {
+		return err
+	}
+	return writeValueTime(enc, t)
 }
 
 // writeAnyWithFormat marshals a value that is not a simple slog kind. It falls
@@ -178,51 +261,4 @@ func writeEntryTime(enc *jsontext.Encoder, key string, t time.Time) error {
 // without an intermediate []byte allocation.
 func writeAnyWithFormat(enc *jsontext.Encoder, v any) error {
 	return json.MarshalEncode(enc, v)
-}
-
-func attrsToMap(attrs []slog.Attr) map[string]any {
-	values := make(map[string]any, len(attrs))
-
-	for _, attr := range attrs {
-		if attr.Key == "" {
-			continue
-		}
-
-		values[attr.Key] = valueToAny(attr.Value)
-	}
-
-	return values
-}
-
-func valueToAny(value slog.Value) any {
-	value = value.Resolve()
-
-	switch value.Kind() {
-	case slog.KindBool:
-		return value.Bool()
-
-	case slog.KindDuration:
-		return value.Duration()
-
-	case slog.KindFloat64:
-		return value.Float64()
-
-	case slog.KindInt64:
-		return value.Int64()
-
-	case slog.KindString:
-		return value.String()
-
-	case slog.KindTime:
-		return value.Time()
-
-	case slog.KindUint64:
-		return value.Uint64()
-
-	case slog.KindGroup:
-		return attrsToMap(value.Group())
-
-	default:
-		return value.Any()
-	}
 }

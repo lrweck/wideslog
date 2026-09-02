@@ -42,7 +42,7 @@ logger.InfoContext(ctx, "user loaded", "user_id", 42)
 time.Sleep(25 * time.Millisecond)
 logger.WarnContext(ctx, "slow dependency", "dependency", "profile-api")
 
-event.End(ctx)
+event.End()
 ```
 
 The final record contains the event attributes, duration, and all buffered
@@ -51,7 +51,7 @@ record:
 
 ```json
 {
-    "timestamp": "2026-08-26T20:31:42.100Z",
+    "time": "2026-08-26T20:31:42.100Z",
     "msg": "request completed",
     "service": "accounts",
     "duration_ms": 50,
@@ -64,7 +64,7 @@ record:
 }
 ```
 
-The root `timestamp` is always present and marks when the wide event started.
+The root `time` is always present and marks when the wide event started.
 The exact timestamps and durations vary on every run. `duration_ms` is the
 elapsed root-event duration in milliseconds.
 
@@ -85,49 +85,49 @@ customerLogger := logger.WithGroup("customer").With("id", "customer-1")
 customerLogger.InfoContext(ctx, "customer loaded")
 ```
 
-## Timestamp modes
+## Time modes
 
 Choose how timestamps are stored on each buffered log. The default is
-`TimestampOffset` with `OffsetMicroseconds`. These options affect only the
+`TimeOffset` with `OffsetMicroseconds`. These options affect only the
 items inside `events`; the root `timestamp` is always emitted:
 
 ```go
 ctx, event := wideslog.NewEvent(context.Background(), logger, "step completed",
-    wideslog.WithTimestampMode(wideslog.TimestampNone),
+    wideslog.WithTimeMode(wideslog.TimeNone),
 )
 
 // No timestamp on individual logs.
 logger.InfoContext(ctx, "step completed")
-event.End(ctx)
+event.End()
 ```
 
-Use `TimestampAbsolute` like this:
+Use `TimeAbsolute` like this:
 
 ```go
 ctx, event := wideslog.NewEvent(context.Background(), logger, "step completed",
-    wideslog.WithTimestampMode(wideslog.TimestampAbsolute),
+    wideslog.WithTimeMode(wideslog.TimeAbsolute),
 )
 logger.InfoContext(ctx, "step completed")
-event.End(ctx)
+event.End()
 ```
 
-Use `TimestampOffset` like this:
+Use `TimeOffset` like this:
 
 ```go
 ctx, event := wideslog.NewEvent(context.Background(), logger, "step completed",
-    wideslog.WithTimestampMode(wideslog.TimestampOffset),
+    wideslog.WithTimeMode(wideslog.TimeOffset),
 )
 logger.InfoContext(ctx, "step completed")
-event.End(ctx)
+event.End()
 ```
 
 The modes produce these per-event fields:
 
 | Mode | Field |
 | --- | --- |
-| `TimestampNone` | no timestamp field |
-| `TimestampAbsolute` | `timestamp` |
-| `TimestampOffset` | `offset_ns`, `offset_us`, or `offset_ms` |
+| `TimeNone` | no timestamp field |
+| `TimeAbsolute` | `time` |
+| `TimeOffset` | `offset_ns`, `offset_us`, or `offset_ms` |
 
 For offset timestamps, choose the unit independently:
 
@@ -141,15 +141,15 @@ Example:
 
 ```go
 ctx, event := wideslog.NewEvent(context.Background(), logger, "step completed",
-    wideslog.WithTimestampMode(wideslog.TimestampOffset),
+    wideslog.WithTimeMode(wideslog.TimeOffset),
     wideslog.WithOffsetUnit(wideslog.OffsetMilliseconds),
 )
 
 logger.InfoContext(ctx, "first step")
 time.Sleep(25 * time.Millisecond)
 logger.InfoContext(ctx, "second step")
-event.End(ctx)
+event.End()
 ```
 
-`main.go` runs all of these cases, including standard `slog`, `TimestampNone`,
-`TimestampAbsolute`, and `TimestampOffset`.
+`main.go` runs all of these cases, including standard `slog`, `TimeNone`,
+`TimeAbsolute`, and `TimeOffset`.

@@ -94,7 +94,9 @@ func TestWithDoesNotLeakToParent(t *testing.T) {
 func TestHandlerWithAttrs(t *testing.T) {
 	var buf bytes.Buffer
 	base := slog.NewJSONHandler(&buf, nil)
-	handler := NewHandler(base).WithAttrs([]slog.Attr{slog.String("source", "child")})
+	hd, err := NewHandler(base)
+	require.NoError(t, err)
+	handler := hd.WithAttrs([]slog.Attr{slog.String("source", "child")})
 	logger := slog.New(handler)
 
 	ctx, event := NewEvent(context.Background(), logger, "op")
@@ -111,7 +113,9 @@ func TestHandlerWithAttrs(t *testing.T) {
 func TestHandlerWithGroup(t *testing.T) {
 	var buf bytes.Buffer
 	base := slog.NewJSONHandler(&buf, nil)
-	handler := NewHandler(base).
+	hd, err := NewHandler(base)
+	require.NoError(t, err)
+	handler := hd.
 		WithGroup("request").
 		WithAttrs([]slog.Attr{slog.String("method", "GET")})
 	logger := slog.New(handler)
@@ -139,7 +143,8 @@ func TestHandlerWithGroup(t *testing.T) {
 func TestHandlerChildrenDoNotModifyParent(t *testing.T) {
 	var buf bytes.Buffer
 	base := slog.NewJSONHandler(&buf, nil)
-	handler := NewHandler(base)
+	handler, err := NewHandler(base)
+	require.NoError(t, err)
 	child := handler.WithAttrs([]slog.Attr{slog.String("scope", "child")})
 
 	logger := slog.New(handler)
@@ -357,8 +362,14 @@ func TestJSONHandler(t *testing.T) {
 	assert.Equal(t, "hello", step(t, root, 0)["msg"])
 }
 
-func TestNewHandlerPanicsOnNil(t *testing.T) {
-	assert.Panics(t, func() { NewHandler(nil) })
+func TestNewHandlerNilReturnsError(t *testing.T) {
+	handler, err := NewHandler(nil)
+	assert.Nil(t, handler)
+	assert.Error(t, err)
+}
+
+func TestNewPanicsOnNilHandler(t *testing.T) {
+	assert.Panics(t, func() { New(nil) })
 }
 
 func TestNewEventPanicsOnNonWideLogger(t *testing.T) {
@@ -369,7 +380,7 @@ func TestNewEventPanicsOnNonWideLogger(t *testing.T) {
 }
 
 func TestWithGroupEmptyReturnsSameHandler(t *testing.T) {
-	handler := NewHandler(slog.NewTextHandler(&bytes.Buffer{}, nil))
+	handler, _ := NewHandler(slog.NewTextHandler(&bytes.Buffer{}, nil))
 	assert.Same(t, handler, handler.WithGroup(""))
 }
 
@@ -390,6 +401,70 @@ func TestEndIsIdempotentAndIgnoresLateAttributes(t *testing.T) {
 	root := decodeLog(t, &buf)
 	assert.Equal(t, "op", root["msg"])
 	assert.NotContains(t, root, "late")
+}
+
+func TestLogAfterEventEndedFallsThrough(t *testing.T) {
+	var buf bytes.Buffer
+	logger := New(slog.NewJSONHandler(&buf, nil))
+
+	ctx, event := NewEvent(context.Background(), logger, "op")
+	logger.InfoContext(ctx, "buffered")
+	event.End()
+	logger.InfoContext(ctx, "after end")
+
+	decoded := func() []map[string]any {
+		out := make([]map[string]any, 0)
+		for _, line := range bytes.Split(bytes.TrimSpace(buf.Bytes()), []byte("\n")) {
+			var v map[string]any
+			require.NoError(t, json.Unmarshal(line, &v))
+			out = append(out, v)
+		}
+		return out
+	}()
+
+	require.Len(t, decoded, 2, "post-end log is emitted, not dropped")
+	assert.Equal(t, "op", decoded[0]["msg"])
+	assert.Equal(t, "buffered", step(t, decoded[0], 0)["msg"])
+	assert.Equal(t, "after end", decoded[1]["msg"])
+	assert.NotContains(t, decoded[1], "events")
+}
+
+func TestNestedEventOuterStillCollects(t *testing.T) {
+	var buf bytes.Buffer
+	logger := New(slog.NewJSONHandler(&buf, nil))
+
+	ctx1, outer := NewEvent(context.Background(), logger, "outer")
+	ctx2, inner := NewEvent(ctx1, logger, "inner")
+
+	logger.InfoContext(ctx2, "inner step")
+	inner.End()
+	logger.InfoContext(ctx1, "outer step")
+	outer.End()
+
+	lines := decodeLines(t, &buf)
+	require.Len(t, lines, 2, "outer and inner events each emit one record")
+
+	// The inner event carries its own step.
+	assert.Equal(t, "inner", lines[0]["msg"])
+	assert.Equal(t, "inner step", step(t, lines[0], 0)["msg"])
+	// The outer event carries its own step; the inner record belongs to the
+	// inner event and is not duplicated.
+	assert.Equal(t, "outer", lines[1]["msg"])
+	assert.Equal(t, "outer step", step(t, lines[1], 0)["msg"])
+}
+
+func decodeLines(t *testing.T, buf *bytes.Buffer) []map[string]any {
+	t.Helper()
+	out := make([]map[string]any, 0)
+	for _, line := range bytes.Split(bytes.TrimSpace(buf.Bytes()), []byte("\n")) {
+		if len(line) == 0 {
+			continue
+		}
+		var v map[string]any
+		require.NoError(t, json.Unmarshal(line, &v))
+		out = append(out, v)
+	}
+	return out
 }
 
 func TestConcurrentLogsToSameEvent(t *testing.T) {
@@ -439,11 +514,17 @@ func TestAbort(t *testing.T) {
 	event.Abort()
 	assert.Zero(t, buf.Len(), "aborted event wrote output")
 
-	// Add and further logs after abort are ignored, and End stays silent.
+	// Add after abort is ignored, and End stays silent on the buffered
+	// records. A log after abort is not lost: it falls through to the
+	// wrapped handler as a standalone record.
 	event.Add(slog.String("late", "ignored"))
-	logger.InfoContext(ctx, "late step")
+	logger.InfoContext(ctx, "post-abort log")
 	event.End()
-	assert.Zero(t, buf.Len(), "aborted event wrote output after End")
+
+	root := decodeLog(t, &buf)
+	assert.Equal(t, "post-abort log", root["msg"])
+	assert.NotContains(t, root, "late")
+	assert.NotContains(t, root, "events")
 }
 
 func TestEndRespectsHandlerLevel(t *testing.T) {

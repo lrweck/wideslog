@@ -19,6 +19,7 @@ package wideslog
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"reflect"
@@ -257,7 +258,8 @@ func (e *Event) End() {
 }
 
 // Abort discards the event without emitting it, releasing the buffered
-// records. Like End it is idempotent; any Add or log after it is ignored.
+// records. Like End it is idempotent; any Add after it is ignored, and logs
+// made through the event's context fall through to the wrapped handler.
 func (e *Event) Abort() {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -340,16 +342,19 @@ type Handler struct {
 var _ slog.Handler = (*Handler)(nil)
 
 // NewHandler returns a Handler that wraps next.
-func NewHandler(next slog.Handler) *Handler {
+//
+// It returns an error when next is nil. Use New or JSONHandler for the
+// convenience APIs, which panic on a nil handler the way slog.New does.
+func NewHandler(next slog.Handler) (*Handler, error) {
 	if next == nil {
-		panic("wideslog: nil handler")
+		return nil, errors.New("wideslog: nil handler")
 	}
 
 	return &Handler{
 		next:     next,
 		fallback: next,
 		attrs:    [][]slog.Attr{nil},
-	}
+	}, nil
 }
 
 // Enabled reports whether the wrapped handler accepts level.
@@ -364,6 +369,10 @@ func (h *Handler) Enabled(
 
 // Handle buffers record in the active Event or forwards it to the wrapped
 // handler when no Event exists.
+//
+// A record reaching an Event that has already ended (via End or Abort) is
+// forwarded to the wrapped handler so it is emitted as a standalone log
+// instead of being silently discarded.
 //
 // Levels the wrapped handler rejects are not buffered; filtering is enforced
 // when the record arrives, matching what slog would do without an Event.
@@ -410,7 +419,9 @@ func (h *Handler) Handle(
 
 	if event.ended {
 		event.mu.Unlock()
-		return nil
+		// The event is no longer collecting. Fall through to the wrapped
+		// handler so the record is still emitted rather than silently lost.
+		return h.fallback.Handle(ctx, record)
 	}
 
 	event.events = append(event.events, eventRecord{
@@ -457,8 +468,17 @@ func (h *Handler) WithGroup(name string) slog.Handler {
 }
 
 // New returns a logger backed by a wide-event Handler.
+//
+// New panics when next is nil, mirroring slog.New which also requires a
+// handler. NewHandler, which New wraps, reports the invalid handler as an
+// error instead.
 func New(next slog.Handler) *slog.Logger {
-	return slog.New(NewHandler(next))
+	h, err := NewHandler(next)
+	if err != nil {
+		panic(err)
+	}
+
+	return slog.New(h)
 }
 
 // JSONHandler returns a logger backed by slog's JSONHandler.

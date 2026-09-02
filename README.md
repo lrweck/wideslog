@@ -150,7 +150,9 @@ step. Attributes passed to an individual log call stay with that step, in
 their original order.
 
 `event.Abort()` discards the buffered steps and emits nothing — handy when
-the operation turns out not to need logging after all.
+the operation turns out not to need logging after all. Any log made through
+the event's context after it ends (via `End` or `Abort`) is not lost: it
+falls through to the wrapped handler and is emitted as a standalone record.
 
 ## HTTP middleware
 

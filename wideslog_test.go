@@ -8,17 +8,26 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func decodeLog(t *testing.T, buf *bytes.Buffer) map[string]any {
 	t.Helper()
 
 	var value map[string]any
-	if err := json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &value); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &value))
 
 	return value
+}
+
+func step(t *testing.T, root map[string]any, i int) map[string]any {
+	t.Helper()
+	events, ok := root["events"].([]any)
+	require.True(t, ok, "root has events array")
+	require.Less(t, i, len(events), "events index in range")
+	return events[i].(map[string]any)
 }
 
 type logValuerFunc func() slog.Value
@@ -29,39 +38,21 @@ func (f logValuerFunc) LogValue() slog.Value {
 
 func TestWithGroup(t *testing.T) {
 	var buf bytes.Buffer
-
 	logger := New(slog.NewJSONHandler(&buf, nil))
-
 	ctx, event := NewEvent(context.Background(), logger, "op")
 
-	customer := logger.WithGroup("customer").With(
-		"id", "customer-1",
-		"name", "Alice",
-	)
-
+	customer := logger.WithGroup("customer").With("id", "customer-1", "name", "Alice")
 	customer.InfoContext(ctx, "customer loaded")
+	event.End()
 
-	event.End(ctx)
-
-	root := decodeLog(t, &buf)
-	events := root["events"].([]any)
-	got := events[0].(map[string]any)
-	customerValue := got["customer"].(map[string]any)
-
-	if customerValue["id"] != "customer-1" {
-		t.Fatalf("unexpected customer.id: %#v", customerValue["id"])
-	}
-
-	if customerValue["name"] != "Alice" {
-		t.Fatalf("unexpected customer.name: %#v", customerValue["name"])
-	}
+	got := step(t, decodeLog(t, &buf), 0)["customer"].(map[string]any)
+	assert.Equal(t, "customer-1", got["id"])
+	assert.Equal(t, "Alice", got["name"])
 }
 
 func TestNestedWithGroup(t *testing.T) {
 	var buf bytes.Buffer
-
 	logger := New(slog.NewJSONHandler(&buf, nil))
-
 	ctx, event := NewEvent(context.Background(), logger, "op")
 
 	debtLogger := logger.
@@ -69,101 +60,78 @@ func TestNestedWithGroup(t *testing.T) {
 		With("id", "customer-1").
 		WithGroup("debt").
 		With("id", "debt-1")
-
 	debtLogger.InfoContext(ctx, "debt loaded")
-
-	event.End(ctx)
+	event.End()
 
 	root := decodeLog(t, &buf)
-	if root["event_count"] != float64(1) {
-		t.Fatalf("unexpected event count: %#v", root["event_count"])
-	}
-	got := root["events"].([]any)[0].(map[string]any)
+	assert.EqualValues(t, 1, root["event_count"])
 
+	got := step(t, root, 0)
 	customer := got["customer"].(map[string]any)
 	debt := customer["debt"].(map[string]any)
-
-	if customer["id"] != "customer-1" {
-		t.Fatalf("unexpected customer.id: %#v", customer["id"])
-	}
-
-	if debt["id"] != "debt-1" {
-		t.Fatalf("unexpected debt.id: %#v", debt["id"])
-	}
+	assert.Equal(t, "customer-1", customer["id"])
+	assert.Equal(t, "debt-1", debt["id"])
 }
 
 func TestWithDoesNotLeakToParent(t *testing.T) {
 	var buf bytes.Buffer
-
 	logger := New(slog.NewJSONHandler(&buf, nil))
-
 	ctx, event := NewEvent(context.Background(), logger, "op")
 
 	child := logger.With("customer_id", "123")
-
 	child.InfoContext(ctx, "child")
 	logger.InfoContext(ctx, "parent")
+	event.End()
 
-	event.End(ctx)
-
-	root := decodeLog(t, &buf)
-	events := root["events"].([]any)
-
-	childEvent := events[0].(map[string]any)
-	parentEvent := events[1].(map[string]any)
-
-	if childEvent["customer_id"] != "123" {
-		t.Fatalf("child lost customer_id: %#v", childEvent)
-	}
-
-	if _, ok := parentEvent["customer_id"]; ok {
-		t.Fatalf("attribute leaked into parent: %#v", parentEvent)
-	}
+	childEvent := step(t, decodeLog(t, &buf), 0)
+	parentEvent := step(t, decodeLog(t, &buf), 1)
+	assert.Equal(t, "123", childEvent["customer_id"])
+	assert.NotContains(t, parentEvent, "customer_id")
 }
 
 func TestHandlerWithAttrs(t *testing.T) {
 	var buf bytes.Buffer
 	base := slog.NewJSONHandler(&buf, nil)
-	handler := NewHandler(base)
-	child := handler.WithAttrs([]slog.Attr{slog.String("source", "child")})
-	logger := slog.New(child)
+	handler := NewHandler(base).WithAttrs([]slog.Attr{slog.String("source", "child")})
+	logger := slog.New(handler)
 
 	ctx, event := NewEvent(context.Background(), logger, "op")
 	logger.InfoContext(ctx, "child event")
+	event.End()
 
-	event.End(ctx)
-
+	// The handler attribute is captured as shared context, written once on
+	// the root record and not repeated in the step.
 	root := decodeLog(t, &buf)
-	got := root["events"].([]any)[0].(map[string]any)
-	if got["source"] != "child" {
-		t.Fatalf("missing handler attribute: %#v", got)
-	}
+	assert.Equal(t, "child", root["source"])
+	assert.NotContains(t, step(t, root, 0), "source")
 }
 
 func TestHandlerWithGroup(t *testing.T) {
 	var buf bytes.Buffer
 	base := slog.NewJSONHandler(&buf, nil)
-	handler := NewHandler(base)
-	child := handler.WithGroup("request").WithAttrs([]slog.Attr{
-		slog.String("method", "GET"),
-	})
-	logger := slog.New(child)
+	handler := NewHandler(base).
+		WithGroup("request").
+		WithAttrs([]slog.Attr{slog.String("method", "GET")})
+	logger := slog.New(handler)
 
 	ctx, event := NewEvent(context.Background(), logger, "op")
 	logger.InfoContext(ctx, "request received", "path", "/users")
+	event.End()
 
-	event.End(ctx)
-
+	// The shared group keeps its skeleton on the root record, wrapping the
+	// root attributes including the events list itself.
 	root := decodeLog(t, &buf)
 	rootRequest := root["request"].(map[string]any)
-	got := rootRequest["events"].([]any)[0].(map[string]any)
-	request := got["request"].(map[string]any)
-	if request["method"] != "GET" {
-		t.Fatalf("missing grouped handler attribute: %#v", request)
-	}
-	if request["path"] != "/users" {
-		t.Fatalf("missing grouped record attribute: %#v", request)
-	}
+	assert.Equal(t, "GET", rootRequest["method"])
+	assert.Contains(t, rootRequest, "events")
+
+	// The step keeps the group skeleton with only its own attribute; the
+	// shared method attribute is not written again.
+	events := rootRequest["events"].([]any)
+	require.Len(t, events, 1)
+	request := events[0].(map[string]any)["request"].(map[string]any)
+	assert.Equal(t, "/users", request["path"])
+	assert.NotContains(t, request, "method")
 }
 
 func TestHandlerChildrenDoNotModifyParent(t *testing.T) {
@@ -178,157 +146,142 @@ func TestHandlerChildrenDoNotModifyParent(t *testing.T) {
 
 	childLogger.InfoContext(ctx, "child")
 	logger.InfoContext(ctx, "parent")
+	event.End()
 
-	event.End(ctx)
+	childEvent := step(t, decodeLog(t, &buf), 0)
+	parentEvent := step(t, decodeLog(t, &buf), 1)
+	assert.Equal(t, "child", childEvent["scope"])
+	assert.NotContains(t, parentEvent, "scope")
+}
 
-	events := decodeLog(t, &buf)["events"].([]any)
-	childEvent := events[0].(map[string]any)
-	parentEvent := events[1].(map[string]any)
-	if childEvent["scope"] != "child" {
-		t.Fatalf("child lost attribute: %#v", childEvent)
+func TestLoggerAttrsNotDuplicatedInEvents(t *testing.T) {
+	var buf bytes.Buffer
+	logger := New(slog.NewJSONHandler(&buf, nil)).With("request_id", "req-1")
+
+	ctx, event := NewEvent(context.Background(), logger, "op")
+	logger.InfoContext(ctx, "step")
+	logger.With("region", "br").InfoContext(ctx, "child step")
+	event.End()
+
+	root := decodeLog(t, &buf)
+	assert.Equal(t, "req-1", root["request_id"])
+
+	events := root["events"].([]any)
+	for i := range events {
+		assert.NotContains(t, events[i].(map[string]any), "request_id", "step %d", i)
 	}
-	if _, ok := parentEvent["scope"]; ok {
-		t.Fatalf("parent received child attribute: %#v", parentEvent)
-	}
+	// The child-only attribute stays on its own step.
+	assert.Equal(t, "br", step(t, root, 1)["region"])
 }
 
 func TestGroupAndDirectAttrs(t *testing.T) {
 	var buf bytes.Buffer
-
 	logger := New(slog.NewJSONHandler(&buf, nil))
-
 	ctx, event := NewEvent(context.Background(), logger, "op")
 
-	logger.WithGroup("http").InfoContext(
-		ctx,
-		"request",
-		"method", "GET",
-		"status", 200,
-	)
+	logger.WithGroup("http").InfoContext(ctx, "request", "method", "GET", "status", 200)
+	event.End()
 
-	event.End(ctx)
-
-	root := decodeLog(t, &buf)
-	got := root["events"].([]any)[0].(map[string]any)
-	httpValue := got["http"].(map[string]any)
-
-	if httpValue["method"] != "GET" {
-		t.Fatalf("unexpected method: %#v", httpValue["method"])
-	}
-
-	if httpValue["status"].(float64) != 200 {
-		t.Fatalf("unexpected status: %#v", httpValue["status"])
-	}
+	httpValue := step(t, decodeLog(t, &buf), 0)["http"].(map[string]any)
+	assert.Equal(t, "GET", httpValue["method"])
+	assert.EqualValues(t, 200, httpValue["status"])
 }
 
-func TestTimestampOffset(t *testing.T) {
+func TestAttrOrderPreserved(t *testing.T) {
 	var buf bytes.Buffer
-
 	logger := New(slog.NewJSONHandler(&buf, nil))
+	ctx, event := NewEvent(context.Background(), logger, "op")
+	logger.InfoContext(ctx, "ordered", "z", 1, "a", 2, "m", 3)
+	event.End()
 
+	raw := buf.Bytes()
+
+	// The flags come first, then the attributes in logged order.
+	flag := bytes.Index(raw, []byte(`"level":"INFO"`))
+	z := bytes.Index(raw, []byte(`"z":1`))
+	a := bytes.Index(raw, []byte(`"a":2`))
+	m := bytes.Index(raw, []byte(`"m":3`))
+	require.True(t, flag != -1 && z != -1 && a != -1 && m != -1, "missing keys in output: %q", raw)
+	assert.True(t, flag < z && z < a && a < m, "attribute order not preserved: %q", raw)
+}
+
+func TestTimeOffset(t *testing.T) {
+	var buf bytes.Buffer
+	logger := New(slog.NewJSONHandler(&buf, nil))
 	ctx, event := NewEvent(
-		context.Background(),
-		logger,
-		"op",
-		WithTimestampMode(TimestampOffset),
+		context.Background(), logger, "op",
+		WithTimeMode(TimeOffset),
 		WithOffsetUnit(OffsetMicroseconds),
 	)
 
 	logger.InfoContext(ctx, "hello")
+	event.End()
 
-	event.End(ctx)
-
-	root := decodeLog(t, &buf)
-	got := root["events"].([]any)[0].(map[string]any)
-
-	if _, ok := got["offset_us"]; !ok {
-		t.Fatalf("missing offset_us: %#v", got)
-	}
-
-	if _, ok := got["timestamp"]; ok {
-		t.Fatalf("unexpected absolute timestamp: %#v", got)
-	}
+	got := step(t, decodeLog(t, &buf), 0)
+	assert.Contains(t, got, "offset_us")
+	assert.NotContains(t, got, "time")
 }
 
-func TestTimestampNone(t *testing.T) {
+func TestTimeNone(t *testing.T) {
 	var buf bytes.Buffer
-
 	logger := New(slog.NewJSONHandler(&buf, nil))
-
-	ctx, event := NewEvent(
-		context.Background(),
-		logger,
-		"op",
-		WithTimestampMode(TimestampNone),
-	)
+	ctx, event := NewEvent(context.Background(), logger, "op", WithTimeMode(TimeNone))
 
 	logger.InfoContext(ctx, "hello")
+	event.End()
 
-	event.End(ctx)
-
-	root := decodeLog(t, &buf)
-	got := root["events"].([]any)[0].(map[string]any)
-
-	if _, ok := got["timestamp"]; ok {
-		t.Fatalf("unexpected timestamp: %#v", got)
-	}
-
-	if _, ok := got["offset_us"]; ok {
-		t.Fatalf("unexpected offset: %#v", got)
-	}
+	got := step(t, decodeLog(t, &buf), 0)
+	assert.NotContains(t, got, "time")
+	assert.NotContains(t, got, "offset_us")
 }
 
-func TestRootTimestampAlwaysPresent(t *testing.T) {
+func TestRootTimeAlwaysPresent(t *testing.T) {
 	tests := []struct {
 		name string
-		mode TimestampMode
+		mode TimeMode
 	}{
-		{"none", TimestampNone},
-		{"absolute", TimestampAbsolute},
-		{"offset", TimestampOffset},
+		{"none", TimeNone},
+		{"absolute", TimeAbsolute},
+		{"offset", TimeOffset},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var buf bytes.Buffer
 			logger := New(slog.NewJSONHandler(&buf, nil))
-			ctx, event := NewEvent(context.Background(), logger, "op", WithTimestampMode(tt.mode))
+			ctx, event := NewEvent(context.Background(), logger, "op", WithTimeMode(tt.mode))
 
 			logger.InfoContext(ctx, "hello")
-			event.End(ctx)
+			event.End()
 
 			root := decodeLog(t, &buf)
-			if _, ok := root["timestamp"]; !ok {
-				t.Fatalf("missing root timestamp: %#v", root)
-			}
+			assert.Contains(t, root, "time")
+			assert.NotContains(t, root, "timestamp")
 		})
 	}
 }
 
 func TestOffsetUnits(t *testing.T) {
 	tests := []struct {
+		name string
 		unit OffsetUnit
 		key  string
 	}{
-		{OffsetNanoseconds, "offset_ns"},
-		{OffsetMicroseconds, "offset_us"},
-		{OffsetMilliseconds, "offset_ms"},
+		{"ns", OffsetNanoseconds, "offset_ns"},
+		{"us", OffsetMicroseconds, "offset_us"},
+		{"ms", OffsetMilliseconds, "offset_ms"},
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.key, func(t *testing.T) {
+		t.Run(tt.name, func(t *testing.T) {
 			var buf bytes.Buffer
 			logger := New(slog.NewJSONHandler(&buf, nil))
 			ctx, event := NewEvent(context.Background(), logger, "op", WithOffsetUnit(tt.unit))
 
 			logger.InfoContext(ctx, "hello")
-			event.End(ctx)
+			event.End()
 
-			root := decodeLog(t, &buf)
-			got := root["events"].([]any)[0].(map[string]any)
-			if _, ok := got[tt.key]; !ok {
-				t.Fatalf("missing %q: %#v", tt.key, got)
-			}
+			assert.Contains(t, step(t, decodeLog(t, &buf), 0), tt.key)
 		})
 	}
 }
@@ -341,59 +294,33 @@ func TestRootAttributesAndEndAttributes(t *testing.T) {
 
 	logger.InfoContext(ctx, "hello")
 	logger.InfoContext(ctx, "completed", slog.Bool("success", true))
-	event.End(ctx)
+	event.End()
 
 	root := decodeLog(t, &buf)
-	if _, ok := root["duration_ms"]; !ok {
-		t.Fatalf("missing root duration_ms: %#v", root)
-	}
-	if _, ok := root["duration"]; ok {
-		t.Fatalf("unexpected root duration: %#v", root)
-	}
-	if root["request_id"] != "req-1" {
-		t.Fatalf("unexpected request_id: %#v", root["request_id"])
-	}
-	if _, ok := root["success"]; ok {
-		t.Fatalf("final step attribute leaked into root: %#v", root)
-	}
-	eventAttrs := root["events"].([]any)[0].(map[string]any)
-	if _, ok := eventAttrs["request_id"]; ok {
-		t.Fatalf("root attribute leaked into event: %#v", eventAttrs)
-	}
-	lastEvent := root["events"].([]any)[1].(map[string]any)
-	if lastEvent["success"] != true {
-		t.Fatalf("end attribute missing from final event: %#v", lastEvent)
-	}
+	assert.Contains(t, root, "duration_ms")
+	assert.NotContains(t, root, "duration")
+	assert.Equal(t, "req-1", root["request_id"])
+	assert.NotContains(t, root, "success")
+	assert.NotContains(t, step(t, root, 0), "request_id")
+	assert.Equal(t, true, step(t, root, 1)["success"])
 }
 
 func TestNewConfigDefaultsAndOptions(t *testing.T) {
 	defaults := NewConfig()
-	if defaults.TimestampMode != TimestampOffset {
-		t.Fatalf("unexpected default timestamp mode: %v", defaults.TimestampMode)
-	}
-	if defaults.OffsetUnit != OffsetMicroseconds {
-		t.Fatalf("unexpected default offset unit: %v", defaults.OffsetUnit)
-	}
+	assert.Equal(t, TimeOffset, defaults.TimeMode)
+	assert.Equal(t, OffsetMicroseconds, defaults.OffsetUnit)
 
-	configured := NewConfig(
-		WithTimestampMode(TimestampAbsolute),
-		WithOffsetUnit(OffsetMilliseconds),
-	)
-	if configured.TimestampMode != TimestampAbsolute {
-		t.Fatalf("unexpected timestamp mode: %v", configured.TimestampMode)
-	}
-	if configured.OffsetUnit != OffsetMilliseconds {
-		t.Fatalf("unexpected offset unit: %v", configured.OffsetUnit)
-	}
+	configured := NewConfig(WithTimeMode(TimeAbsolute), WithOffsetUnit(OffsetMilliseconds))
+	assert.Equal(t, TimeAbsolute, configured.TimeMode)
+	assert.Equal(t, OffsetMilliseconds, configured.OffsetUnit)
 }
 
 func TestNilContextsAreSupported(t *testing.T) {
 	logger := New(slog.NewTextHandler(&bytes.Buffer{}, nil))
-	ctx, event := NewEvent(nil, logger, "op")
-	if ctx == nil || event == nil {
-		t.Fatal("Start returned a nil value")
-	}
-	event.End(nil)
+	ctx, event := NewEvent(context.Background(), logger, "op")
+	assert.NotNil(t, ctx)
+	assert.NotNil(t, event)
+	event.End()
 }
 
 func TestJSONHandler(t *testing.T) {
@@ -402,74 +329,64 @@ func TestJSONHandler(t *testing.T) {
 
 	ctx, event := NewEvent(context.Background(), logger, "op")
 	logger.InfoContext(ctx, "hello")
-	event.End(ctx)
+	event.End()
 
 	root := decodeLog(t, &buf)
-	if root["msg"] != "op" {
-		t.Fatalf("unexpected root message, got %#v", root["msg"])
-	}
-	events := root["events"].([]any)
-	if len(events) != 1 {
-		t.Fatalf("expected 1 buffered event, got %d", len(events))
-	}
-	if events[0].(map[string]any)["msg"] != "hello" {
-		t.Fatalf("unexpected buffered message: %#v", events[0])
-	}
+	assert.Equal(t, "op", root["msg"])
+	assert.Len(t, root["events"].([]any), 1)
+	assert.Equal(t, "hello", step(t, root, 0)["msg"])
 }
 
 func TestNewHandlerPanicsOnNil(t *testing.T) {
-	defer func() {
-		if recover() == nil {
-			t.Fatal("NewHandler did not panic")
-		}
-	}()
-
-	NewHandler(nil)
+	assert.Panics(t, func() { NewHandler(nil) })
 }
 
 func TestNewEventPanicsOnNonWideLogger(t *testing.T) {
-	defer func() {
-		if recover() == nil {
-			t.Fatal("NewEvent did not panic")
-		}
-	}()
-
 	logger := slog.New(slog.NewJSONHandler(&bytes.Buffer{}, nil))
-	NewEvent(context.Background(), logger, "op")
+	assert.Panics(t, func() {
+		NewEvent(context.Background(), logger, "op")
+	})
 }
 
 func TestWithGroupEmptyReturnsSameHandler(t *testing.T) {
 	handler := NewHandler(slog.NewTextHandler(&bytes.Buffer{}, nil))
-	if handler.WithGroup("") != handler {
-		t.Fatal("empty group created a new handler")
-	}
+	assert.Same(t, handler, handler.WithGroup(""))
 }
 
 func TestFromContextNil(t *testing.T) {
-	if event := FromContext(nil); event != nil {
-		t.Fatalf("unexpected event: %#v", event)
-	}
+	assert.Nil(t, FromContext(context.Background()))
 }
 
 func TestEndIsIdempotentAndIgnoresLateAttributes(t *testing.T) {
 	var buf bytes.Buffer
 	logger := New(slog.NewJSONHandler(&buf, nil))
+	_, event := NewEvent(context.Background(), logger, "op")
+
+	event.End()
+	event.Add(slog.String("late", "ignored"))
+	event.End()
+
+	assert.Equal(t, 1, bytes.Count(buf.Bytes(), []byte("\n")), "one output record")
+	root := decodeLog(t, &buf)
+	assert.Equal(t, "op", root["msg"])
+	assert.NotContains(t, root, "late")
+}
+
+func TestAbort(t *testing.T) {
+	var buf bytes.Buffer
+	logger := New(slog.NewJSONHandler(&buf, nil))
 	ctx, event := NewEvent(context.Background(), logger, "op")
 
-	event.End(ctx)
-	event.Add(slog.String("late", "ignored"))
-	event.End(ctx)
+	logger.InfoContext(ctx, "step")
+	event.Abort()
+	event.Abort()
+	assert.Zero(t, buf.Len(), "aborted event wrote output")
 
-	if lines := bytes.Count(buf.Bytes(), []byte("\n")); lines != 1 {
-		t.Fatalf("expected one output record, got %d", lines)
-	}
-	root := decodeLog(t, &buf)
-	if root["msg"] != "op" {
-		t.Fatalf("unexpected root message: %#v", root["msg"])
-	}
-	if _, ok := root["late"]; ok {
-		t.Fatalf("late attribute was emitted: %#v", root)
-	}
+	// Add and further logs after abort are ignored, and End stays silent.
+	event.Add(slog.String("late", "ignored"))
+	logger.InfoContext(ctx, "late step")
+	event.End()
+	assert.Zero(t, buf.Len(), "aborted event wrote output after End")
 }
 
 func TestEndRespectsHandlerLevel(t *testing.T) {
@@ -480,61 +397,42 @@ func TestEndRespectsHandlerLevel(t *testing.T) {
 	// so the root has no level to emit at and nothing is written.
 	ctx, event := NewEvent(context.Background(), logger, "op")
 	logger.InfoContext(ctx, "filtered")
-	event.End(ctx)
-	if buf.Len() != 0 {
-		t.Fatalf("expected no output, got: %q", buf.String())
-	}
+	event.End()
+	assert.Zero(t, buf.Len(), "filtered event wrote output")
 
 	ctx, event = NewEvent(context.Background(), logger, "op")
 	logger.ErrorContext(ctx, "boom")
-	event.End(ctx)
+	event.End()
 
-	if lines := strings.Count(buf.String(), "\n"); lines != 1 {
-		t.Fatalf("expected 1 line, got %d: %q", lines, buf.String())
-	}
+	assert.Equal(t, 1, strings.Count(buf.String(), "\n"), "one output record")
 	root := decodeLog(t, &buf)
-	if root["msg"] != "op" {
-		t.Fatalf("unexpected root message: %#v", root["msg"])
-	}
-	if root["level"] != "ERROR" {
-		t.Fatalf("root should reflect the buffered severity: %#v", root["level"])
-	}
-	events := root["events"].([]any)
-	if len(events) != 1 {
-		t.Fatalf("expected 1 buffered event, got %d", len(events))
-	}
-	if events[0].(map[string]any)["msg"] != "boom" {
-		t.Fatalf("unexpected buffered message: %#v", events[0])
-	}
+	assert.Equal(t, "op", root["msg"])
+	assert.Equal(t, "ERROR", root["level"])
+	assert.Len(t, root["events"].([]any), 1)
+	assert.Equal(t, "boom", step(t, root, 0)["msg"])
 }
 
-func TestStartLoggerAttrsOnRoot(t *testing.T) {
+func TestNewEventLoggerAttrsOnRoot(t *testing.T) {
 	var buf bytes.Buffer
 	logger := New(slog.NewJSONHandler(&buf, nil)).With("service", "accounts")
 
 	ctx, event := NewEvent(context.Background(), logger, "op")
 	logger.InfoContext(ctx, "step")
-	event.End(ctx)
+	event.End()
 
-	root := decodeLog(t, &buf)
-	if root["service"] != "accounts" {
-		t.Fatalf("root lost logger attribute: %#v", root)
-	}
+	assert.Equal(t, "accounts", decodeLog(t, &buf)["service"])
 }
 
-func TestStartLoggerGroupOnRoot(t *testing.T) {
+func TestNewEventLoggerGroupOnRoot(t *testing.T) {
 	var buf bytes.Buffer
 	logger := New(slog.NewJSONHandler(&buf, nil)).WithGroup("request").With("method", "GET")
 
 	ctx, event := NewEvent(context.Background(), logger, "op")
 	logger.InfoContext(ctx, "step")
-	event.End(ctx)
+	event.End()
 
-	root := decodeLog(t, &buf)
-	request := root["request"].(map[string]any)
-	if request["method"] != "GET" {
-		t.Fatalf("root lost grouped attribute: %#v", root)
-	}
+	request := decodeLog(t, &buf)["request"].(map[string]any)
+	assert.Equal(t, "GET", request["method"])
 }
 
 func TestValueConversions(t *testing.T) {
@@ -551,53 +449,37 @@ func TestValueConversions(t *testing.T) {
 		"time", time.Unix(10, 0).UTC(),
 		"uint", uint64(3),
 	)
-	event.End(ctx)
+	event.End()
 
-	got := decodeLog(t, &buf)["events"].([]any)[0].(map[string]any)
-	if got["bool"] != true || got["float"] != 1.5 || got["int"] != float64(2) ||
-		got["string"] != "value" || got["uint"] != float64(3) {
-		t.Fatalf("unexpected converted values: %#v", got)
-	}
+	got := step(t, decodeLog(t, &buf), 0)
+	assert.Equal(t, true, got["bool"])
+	assert.Equal(t, 1.5, got["float"])
+	assert.EqualValues(t, 2, got["int"])
+	assert.Equal(t, "value", got["string"])
+	assert.EqualValues(t, 3, got["uint"])
 }
 
 func TestInvalidEnumValuesUseDefaults(t *testing.T) {
-	if got := OffsetUnit(99).String(); got != "us" {
-		t.Fatalf("unexpected offset suffix: %q", got)
-	}
-	if got := OffsetUnit(99).convert(time.Second); got != int64(time.Second/time.Microsecond) {
-		t.Fatalf("unexpected offset conversion: %d", got)
-	}
+	assert.Equal(t, "us", OffsetUnit(99).String())
+	require.Equal(t, int64(time.Second/time.Microsecond), OffsetUnit(99).convert(time.Second))
 }
 
 func TestNoEventFallsThrough(t *testing.T) {
 	var buf bytes.Buffer
-
 	logger := New(slog.NewJSONHandler(&buf, nil))
 
-	logger.WithGroup("http").Info(
-		"hello",
-		"status", 200,
-	)
+	logger.WithGroup("http").Info("hello", "status", 200)
 
-	root := decodeLog(t, &buf)
-	httpValue := root["http"].(map[string]any)
-
-	if httpValue["status"].(float64) != 200 {
-		t.Fatalf("unexpected status: %#v", httpValue["status"])
-	}
+	httpValue := decodeLog(t, &buf)["http"].(map[string]any)
+	assert.EqualValues(t, 200, httpValue["status"])
 }
 
 func TestLogValuerResolvedAtHandle(t *testing.T) {
 	var buf bytes.Buffer
-
 	logger := New(slog.NewJSONHandler(&buf, nil))
-
 	ctx, event := NewEvent(context.Background(), logger, "op")
 
-	type state struct {
-		value string
-	}
-
+	type state struct{ value string }
 	s := &state{value: "before"}
 
 	logger.InfoContext(ctx, "valued",
@@ -605,47 +487,28 @@ func TestLogValuerResolvedAtHandle(t *testing.T) {
 			return slog.StringValue(s.value)
 		})),
 	)
-
 	s.value = "after"
-
-	event.End(ctx)
-
-	root := decodeLog(t, &buf)
-	got := root["events"].([]any)[0].(map[string]any)
+	event.End()
 
 	// Resolution happens while Handle is processing the record.
-	if got["value"] != "before" {
-		t.Fatalf("unexpected resolved value: %#v", got["value"])
-	}
+	assert.Equal(t, "before", step(t, decodeLog(t, &buf), 0)["value"])
 }
 
 func TestLogValuerReturningGroup(t *testing.T) {
 	var buf bytes.Buffer
-
 	logger := New(slog.NewJSONHandler(&buf, nil))
 	ctx, event := NewEvent(context.Background(), logger, "op")
 
 	logger.InfoContext(ctx, "valued",
 		"group", slog.AnyValue(logValuerFunc(func() slog.Value {
-			return slog.GroupValue(
-				slog.String("inner", "resolved"),
-				slog.Bool("flag", true),
-			)
+			return slog.GroupValue(slog.String("inner", "resolved"), slog.Bool("flag", true))
 		})),
 	)
+	event.End()
 
-	event.End(ctx)
-
-	root := decodeLog(t, &buf)
-	got := root["events"].([]any)[0].(map[string]any)
-	group := got["group"].(map[string]any)
-
-	if group["inner"] != "resolved" {
-		t.Fatalf("unexpected resolved group member: %#v", group)
-	}
-	if group["flag"] != true {
-		t.Fatalf("unexpected resolved group flag: %#v", group)
-	}
+	group := step(t, decodeLog(t, &buf), 0)["group"].(map[string]any)
+	assert.Equal(t, "resolved", group["inner"])
+	assert.Equal(t, true, group["flag"])
 }
 
 func TestNewEventMsgOnRoot(t *testing.T) {
@@ -654,32 +517,22 @@ func TestNewEventMsgOnRoot(t *testing.T) {
 	ctx, event := NewEvent(context.Background(), logger, "checkout order ord_8F31A2")
 
 	logger.InfoContext(ctx, "hello")
-	event.End(ctx)
+	event.End()
 
-	root := decodeLog(t, &buf)
-	if root["msg"] != "checkout order ord_8F31A2" {
-		t.Fatalf("unexpected root message: %#v", root["msg"])
-	}
+	assert.Equal(t, "checkout order ord_8F31A2", decodeLog(t, &buf)["msg"])
 }
 
 func TestEndNoImplicitEvent(t *testing.T) {
 	var buf bytes.Buffer
 	logger := New(slog.NewJSONHandler(&buf, nil))
-	ctx, event := NewEvent(context.Background(), logger, "op")
+	_, event := NewEvent(context.Background(), logger, "op")
 	event.Add(slog.String("request_id", "req-1"))
-
-	event.End(ctx)
+	event.End()
 
 	root := decodeLog(t, &buf)
-	if root["request_id"] != "req-1" {
-		t.Fatalf("root attribute missing: %#v", root)
-	}
-	if root["event_count"] != float64(0) {
-		t.Fatalf("unexpected event count: %#v", root["event_count"])
-	}
-	if events := root["events"].([]any); len(events) != 0 {
-		t.Fatalf("expected no events, got %#v", events)
-	}
+	assert.Equal(t, "req-1", root["request_id"])
+	assert.EqualValues(t, 0, root["event_count"])
+	assert.Empty(t, root["events"].([]any))
 }
 
 func TestFinalLogIsPartOfEvents(t *testing.T) {
@@ -689,24 +542,14 @@ func TestFinalLogIsPartOfEvents(t *testing.T) {
 
 	logger.InfoContext(ctx, "step one")
 	logger.WarnContext(ctx, "final")
-	event.End(ctx)
+	event.End()
 
 	root := decodeLog(t, &buf)
-	if root["event_count"] != float64(2) {
-		t.Fatalf("unexpected event count: %#v", root["event_count"])
-	}
-	if root["level"] != "WARN" {
-		t.Fatalf("root should reflect the highest buffered severity: %#v", root["level"])
-	}
-	events := root["events"].([]any)
-	if len(events) != 2 {
-		t.Fatalf("expected 2 events, got %#v", events)
-	}
-	last := events[1].(map[string]any)
-	if last["msg"] != "final" {
-		t.Fatalf("final step missing from events: %#v", last)
-	}
-	if last["level"] != "WARN" {
-		t.Fatalf("unexpected final step level: %#v", last["level"])
-	}
+	assert.EqualValues(t, 2, root["event_count"])
+	assert.Equal(t, "WARN", root["level"])
+	assert.Len(t, root["events"].([]any), 2)
+
+	last := step(t, root, 1)
+	assert.Equal(t, "final", last["msg"])
+	assert.Equal(t, "WARN", last["level"])
 }

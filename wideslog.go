@@ -1,27 +1,45 @@
-// Package wideslog collects slog records into request-scoped wide events.
+// Package wideslog collects slog records from one operation into a single
+// structured record: a wide event.
+//
+// Set up the logger once with New or JSONHandler, then wrap each operation:
+//
+//	ctx, event := wideslog.NewEvent(ctx, logger, "checkout")
+//	event.Add(slog.String("request_id", "req-1"))
+//	logger.InfoContext(ctx, "payment authorized")
+//	event.End()
+//
+// Log calls made with the returned context are buffered instead of being
+// written immediately. End emits them as one record whose root carries the
+// shared context, and the buffered lines live in the events field. Logs made
+// without an active event pass through to the wrapped handler unchanged.
+// Abort discards the buffered lines without emitting anything.
+//
+// See the README and the example program for a full walkthrough.
 package wideslog
 
 import (
 	"context"
 	"io"
 	"log/slog"
+	"reflect"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 )
 
-// TimestampMode controls how timestamps are recorded for individual events.
-type TimestampMode uint8
+// TimeMode controls how timestamps are recorded for individual events.
+type TimeMode uint8
 
 const (
-	// TimestampNone omits timestamps from individual events.
-	TimestampNone TimestampMode = iota
+	// TimeNone omits timestamps from individual events.
+	TimeNone TimeMode = iota
 
-	// TimestampAbsolute records each event's wall-clock timestamp.
-	TimestampAbsolute
+	// TimeAbsolute records each event's wall-clock timestamp.
+	TimeAbsolute
 
-	// TimestampOffset records each event's elapsed time from the wide event start.
-	TimestampOffset
+	// TimeOffset records each event's elapsed time from the wide event start.
+	TimeOffset
 )
 
 // OffsetUnit selects the unit used for relative event timestamps.
@@ -40,21 +58,21 @@ const (
 
 // Config defines the timestamp behavior of an Event.
 type Config struct {
-	TimestampMode TimestampMode
-	OffsetUnit    OffsetUnit
+	TimeMode   TimeMode
+	OffsetUnit OffsetUnit
 }
 
-// Option configures an Event created by Start.
+// Option configures an Event created by NewEvent.
 type Option func(*Config)
 
-// WithTimestampMode sets how individual event timestamps are represented.
-func WithTimestampMode(mode TimestampMode) Option {
+// WithTimeMode sets how individual event timestamps are represented.
+func WithTimeMode(mode TimeMode) Option {
 	return func(c *Config) {
-		c.TimestampMode = mode
+		c.TimeMode = mode
 	}
 }
 
-// WithOffsetUnit sets the unit used when TimestampOffset is enabled.
+// WithOffsetUnit sets the unit used when TimeOffset is enabled.
 func WithOffsetUnit(unit OffsetUnit) Option {
 	return func(c *Config) {
 		c.OffsetUnit = unit
@@ -64,8 +82,8 @@ func WithOffsetUnit(unit OffsetUnit) Option {
 // NewConfig returns the default configuration with options applied.
 func NewConfig(options ...Option) Config {
 	cfg := Config{
-		TimestampMode: TimestampOffset,
-		OffsetUnit:    OffsetMicroseconds,
+		TimeMode:   TimeOffset,
+		OffsetUnit: OffsetMicroseconds,
 	}
 
 	for _, option := range options {
@@ -86,6 +104,7 @@ type Event struct {
 	output slog.Handler
 	config Config
 	start  time.Time
+	ctx    context.Context
 	scoped [][]slog.Attr
 	groups []string
 	msg    string
@@ -121,9 +140,6 @@ func NewEvent(
 	msg string,
 	options ...Option,
 ) (context.Context, *Event) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
 
 	if logger == nil {
 		logger = slog.Default()
@@ -141,18 +157,21 @@ func NewEvent(
 		config: NewConfig(options...),
 		start:  time.Now(),
 		msg:    msg,
+		// ponytail: cap 8 covers typical step counts in one alloc; larger
+		// events fall back to amortized growth, fine until proven otherwise.
+		events: make([]eventRecord, 0, 8),
 	}
 	event.scoped = wide.attrs
 	event.groups = wide.groups
 
-	return context.WithValue(ctx, contextKey{}, event), event
+	ctx = context.WithValue(ctx, contextKey{}, event)
+	event.ctx = ctx
+
+	return ctx, event
 }
 
 // FromContext returns the Event stored in ctx, or nil when none is present.
 func FromContext(ctx context.Context) *Event {
-	if ctx == nil {
-		return nil
-	}
 
 	event, _ := ctx.Value(contextKey{}).(*Event)
 	return event
@@ -172,7 +191,8 @@ func (e *Event) Add(attrs ...slog.Attr) {
 	e.attrs = append(e.attrs, attrs...)
 }
 
-// End emits the accumulated wide event.
+// End emits the accumulated wide event, using the context captured at
+// NewEvent.
 //
 // End is idempotent. Only the first call emits the event, and no error is
 // returned: an output handler that fails to write is treated the same way
@@ -183,10 +203,8 @@ func (e *Event) Add(attrs ...slog.Attr) {
 // field. The root record uses the highest level found in the buffered steps
 // (Info when there are none), so handlers that only accept serious levels
 // still receive it.
-func (e *Event) End(ctx context.Context) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
+func (e *Event) End() {
+	ctx := e.ctx
 
 	e.mu.Lock()
 
@@ -208,7 +226,6 @@ func (e *Event) End(ctx context.Context) {
 
 	rootAttrs = append(
 		rootAttrs,
-		slog.Time("timestamp", start),
 		slog.Int64("duration_ms", time.Since(start).Milliseconds()),
 		slog.Int("event_count", len(events)),
 	)
@@ -222,13 +239,24 @@ func (e *Event) End(ctx context.Context) {
 
 	rootAttrs = append(
 		rootAttrs,
-		slog.Any("events", e.eventsValue(events)),
+		slog.Any("events", eventsArray{entries: e.eventsValue(events)}),
 	)
 
-	record := slog.NewRecord(time.Now(), level, msg, 0)
+	record := slog.NewRecord(start, level, msg, 0)
 	record.AddAttrs(scopedAttrs(e.scoped, e.groups, rootAttrs)...)
 
 	_ = e.output.Handle(ctx, record)
+}
+
+// Abort discards the event without emitting it, releasing the buffered
+// records. Like End it is idempotent; any Add or log after it is ignored.
+func (e *Event) Abort() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	e.ended = true
+	e.events = nil
+	e.attrs = nil
 }
 
 func maxEventLevel(events []eventRecord) slog.Level {
@@ -243,35 +271,26 @@ func maxEventLevel(events []eventRecord) slog.Level {
 	return level
 }
 
-func (e *Event) eventsValue(events []eventRecord) []any {
-	values := make([]any, 0, len(events))
+func (e *Event) eventsValue(records []eventRecord) []eventEntry {
+	entries := make([]eventEntry, 0, len(records))
 
-	for _, event := range events {
-		entry := make(map[string]any, len(event.attrs)+3)
-
-		switch e.config.TimestampMode {
-		case TimestampAbsolute:
-			entry["timestamp"] = event.time
-
-		case TimestampOffset:
-			entry["offset_"+e.config.OffsetUnit.String()] = e.config.OffsetUnit.convert(event.offset)
+	for _, record := range records {
+		entry := eventEntry{
+			record: record,
+			config: e.config,
 		}
-
-		entry["level"] = event.level.String()
-		entry["msg"] = event.message
-
-		for _, attr := range event.attrs {
-			if attr.Key == "" {
-				continue
-			}
-
-			entry[attr.Key] = valueToAny(attr.Value)
-		}
-
-		values = append(values, entry)
+		entries = append(entries, entry)
 	}
 
-	return values
+	return entries
+}
+
+func reservedEventKey(key string) bool {
+	switch key {
+	case "level", "msg", "time":
+		return true
+	}
+	return strings.HasPrefix(key, "offset_")
 }
 
 func (u OffsetUnit) String() string {
@@ -340,6 +359,11 @@ func (h *Handler) Enabled(
 //
 // Levels the wrapped handler rejects are not buffered; filtering is enforced
 // when the record arrives, matching what slog would do without an Event.
+//
+// Only the attributes the logging handler adds beyond the Event's root scopes
+// are attached to the buffered record: shared attributes are stripped from the
+// matching scopes, so the group skeleton stays but the shared context is
+// written once at the root.
 func (h *Handler) Handle(
 	ctx context.Context,
 	record slog.Record,
@@ -354,7 +378,20 @@ func (h *Handler) Handle(
 		return nil
 	}
 
-	attrs := scopedAttrs(h.attrs, h.groups, recordAttrs(record))
+	raw := recordAttrs(record)
+
+	scopes := h.attrs
+	if len(event.scoped) > 0 {
+		scopes = make([][]slog.Attr, len(h.attrs))
+		for i := range h.attrs {
+			if i < len(event.scoped) && len(event.scoped[i]) > 0 {
+				scopes[i] = minusShared(h.attrs[i], event.scoped[i])
+			} else {
+				scopes[i] = h.attrs[i]
+			}
+		}
+	}
+	attrs := scopedAttrs(scopes, h.groups, raw)
 
 	// Resolve LogValuer values while the event's context is still active.
 	// This mirrors slog's normal record processing semantics and avoids
@@ -435,6 +472,34 @@ func unwrap(h slog.Handler) slog.Handler {
 	}
 }
 
+// minusShared returns scope without the attributes that also appear in shared
+// (compared by key and resolved value), so those attributes are not written
+// again inside every buffered step.
+func minusShared(scope, shared []slog.Attr) []slog.Attr {
+	if len(shared) == 0 || len(scope) == 0 {
+		return scope
+	}
+
+	out := make([]slog.Attr, 0, len(scope))
+	for _, attr := range scope {
+		value := attr.Value.Resolve()
+		keep := true
+
+		for _, s := range shared {
+			if attr.Key == s.Key && reflect.DeepEqual(value, s.Value.Resolve()) {
+				keep = false
+				break
+			}
+		}
+
+		if keep {
+			out = append(out, attr)
+		}
+	}
+
+	return out
+}
+
 func appendScopedAttrs(scopes [][]slog.Attr, attrs []slog.Attr) [][]slog.Attr {
 	result := make([][]slog.Attr, len(scopes))
 	for i, scope := range scopes {
@@ -458,10 +523,9 @@ func scopedAttrs(attrs [][]slog.Attr, groups []string, record []slog.Attr) []slo
 
 func recordAttrs(record slog.Record) []slog.Attr {
 	attrs := make([]slog.Attr, 0, record.NumAttrs())
-	record.Attrs(func(attr slog.Attr) bool {
+	for attr := range record.Attrs {
 		attrs = append(attrs, attr)
-		return true
-	})
+	}
 	return attrs
 }
 

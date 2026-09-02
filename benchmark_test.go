@@ -27,7 +27,7 @@ func BenchmarkSlogFiveLines(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		logger := benchSlogBase.With(
 			"service", "payments-api",
 			"request_id", "req_01J9Y7K2",
@@ -45,7 +45,7 @@ func BenchmarkWideslogFiveLogsOneLine(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		ctx, event := NewEvent(benchCtx, base, "charge payment pay_7D91B4")
 		event.Add(
 			slog.String("service", "payments-api"),
@@ -54,6 +54,6 @@ func BenchmarkWideslogFiveLogsOneLine(b *testing.B) {
 			slog.String("user_id", "usr_4821"),
 		)
 		chargeFive(base, ctx)
-		event.End(ctx)
+		event.End()
 	}
 }

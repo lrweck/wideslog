@@ -41,22 +41,22 @@ func wideEvent() {
 	time.Sleep(logPause)
 	logger.WarnContext(ctx, "slow dependency", "dependency", "profile-api")
 
-	event.End(ctx)
+	event.End()
 }
 
 func timestampModes() {
 	fmt.Println("--- timestamp modes ---")
 
-	showTimestampMode("none", wideslog.TimestampNone)
-	showTimestampMode("absolute", wideslog.TimestampAbsolute)
-	showTimestampMode("offset", wideslog.TimestampOffset)
+	showTimeMode("none", wideslog.TimeNone)
+	showTimeMode("absolute", wideslog.TimeAbsolute)
+	showTimeMode("offset", wideslog.TimeOffset)
 }
 
-func showTimestampMode(name string, mode wideslog.TimestampMode) {
+func showTimeMode(name string, mode wideslog.TimeMode) {
 	logger := wideslog.JSONHandler(os.Stdout, nil)
 	ctx, event := wideslog.NewEvent(context.Background(), logger,
 		name+" example",
-		wideslog.WithTimestampMode(mode),
+		wideslog.WithTimeMode(mode),
 		wideslog.WithOffsetUnit(wideslog.OffsetMilliseconds),
 	)
 
@@ -64,5 +64,5 @@ func showTimestampMode(name string, mode wideslog.TimestampMode) {
 	time.Sleep(logPause)
 	logger.LogAttrs(ctx, slog.LevelInfo, "finished", slog.Int("step", 2))
 
-	event.End(ctx)
+	event.End()
 }

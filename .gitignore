@@ -11,6 +11,10 @@
 # Test binary, built with `go test -c`
 *.test
 
+# Build and profiling artifacts (make build-example, make bench-cpu/bench-mem)
+/bin/
+*.prof
+
 # Code coverage profiles and other test artifacts
 *.out
 coverage.*

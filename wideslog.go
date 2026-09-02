@@ -110,7 +110,7 @@ type Event struct {
 	groups []string
 	msg    string
 	attrs  []slog.Attr
-	events []eventRecord
+	events *[]eventRecord
 	ended  bool
 }
 
@@ -119,7 +119,37 @@ type eventRecord struct {
 	offset  time.Duration
 	level   slog.Level
 	message string
-	attrs   []slog.Attr
+	attrs   *[]slog.Attr
+}
+
+// cap 32 covers the typical 5-50 record range in one capped slice without
+// per-append growth; larger events grow amortized.
+const eventCap = 32
+
+// eventRecordPool reuses the per-Event buffering slice across events. The
+// pool holds a pointer so Put never re-boxes the slice into an interface.
+// Returns go back in End/Abort; NewEvent pulls one to avoid a fresh
+// allocation per request.
+var eventRecordPool = sync.Pool{
+	New: func() any { s := make([]eventRecord, 0, eventCap); return &s },
+}
+
+// eventEntryPool reuses the per-End eventEntry slice. Entries are rebuilt on
+// every End, so the backing array is returned once marshaling completes.
+// Stored as a pointer to avoid Put boxing allocations.
+var eventEntryPool = sync.Pool{
+	New: func() any { s := make([]eventEntry, 0, eventCap); return &s },
+}
+
+// attrCap covers a typical record's attributes in one capped slice.
+const attrCap = 16
+
+// attrSlicePool reuses the []slog.Attr backing each buffered record. A
+// pointer is pooled so Put never re-boxes the slice. Slices are owned by the
+// event until End, which returns them once marshaling completes. Empty
+// records allocate nothing and are never pooled.
+var attrSlicePool = sync.Pool{
+	New: func() any { s := make([]slog.Attr, 0, attrCap); return &s },
 }
 
 // NewEvent begins collecting records for a request-scoped wide event.
@@ -161,10 +191,9 @@ func NewEvent(
 		config: NewConfig(options...),
 		start:  time.Now(),
 		msg:    msg,
-		// ponytail: cap 8 covers typical step counts in one alloc; larger
-		// events fall back to amortized growth, fine until proven otherwise.
-		events: make([]eventRecord, 0, 8),
+		events: eventRecordPool.Get().(*[]eventRecord),
 	}
+	*event.events = (*event.events)[:0]
 	event.scoped = wide.attrs
 	event.groups = wide.groups
 
@@ -229,32 +258,54 @@ func (e *Event) End() {
 	rootAttrs := make([]slog.Attr, 0, len(e.attrs)+3)
 	rootAttrs = append(rootAttrs, e.attrs...)
 
-	events := e.events
+	eventsPtr := e.events
+	records := *eventsPtr
 	e.events = nil
 	start := e.start
 
 	rootAttrs = append(
 		rootAttrs,
 		slog.Int64("duration_ms", time.Since(start).Milliseconds()),
-		slog.Int("event_count", len(events)),
+		slog.Int("event_count", len(records)),
 	)
 
 	e.mu.Unlock()
 
-	level := maxEventLevel(events)
+	level := maxEventLevel(records)
 	if !e.output.Enabled(ctx, level) {
+		releaseEvents(records)
+		eventRecordPool.Put(eventsPtr)
 		return
 	}
 
+	// The entries slice is handed to the eventsArray value and marshaled
+	// synchronously by the wrapped handler during Handle; all pooled buffers
+	// (entries, events, and each record's attrs) are returned once Handle
+	// returns.
+	entriesPtr := e.eventsValue(records)
 	rootAttrs = append(
 		rootAttrs,
-		slog.Any("events", eventsArray{entries: e.eventsValue(events)}),
+		slog.Any("events", eventsArray{entries: entriesPtr}),
 	)
 
 	record := slog.NewRecord(start, level, msg, 0)
 	record.AddAttrs(scopedAttrs(scoped, groups, rootAttrs)...)
 
 	_ = e.output.Handle(ctx, record)
+
+	eventEntryPool.Put(entriesPtr)
+	releaseEvents(records)
+	eventRecordPool.Put(eventsPtr)
+}
+
+// releaseEvents returns each buffered record's attribute slice to the pool.
+// Called only from End/Abort, after Handle has finished marshaling.
+func releaseEvents(records []eventRecord) {
+	for i := range records {
+		if attrs := records[i].attrs; attrs != nil {
+			attrSlicePool.Put(attrs)
+		}
+	}
 }
 
 // Abort discards the event without emitting it, releasing the buffered
@@ -265,7 +316,11 @@ func (e *Event) Abort() {
 	defer e.mu.Unlock()
 
 	e.ended = true
-	e.events = nil
+	if e.events != nil {
+		releaseEvents(*e.events)
+		eventRecordPool.Put(e.events)
+		e.events = nil
+	}
 	e.attrs = nil
 }
 
@@ -281,15 +336,15 @@ func maxEventLevel(events []eventRecord) slog.Level {
 	return level
 }
 
-func (e *Event) eventsValue(records []eventRecord) []eventEntry {
-	entries := make([]eventEntry, 0, len(records))
+func (e *Event) eventsValue(records []eventRecord) *[]eventEntry {
+	entries := eventEntryPool.Get().(*[]eventEntry)
+	*entries = (*entries)[:0]
 
 	for _, record := range records {
-		entry := eventEntry{
+		*entries = append(*entries, eventEntry{
 			record: record,
 			config: e.config,
-		}
-		entries = append(entries, entry)
+		})
 	}
 
 	return entries
@@ -397,6 +452,11 @@ func (h *Handler) Handle(
 
 	raw := recordAttrs(record)
 
+	var rawSlice []slog.Attr
+	if raw != nil {
+		rawSlice = *raw
+	}
+
 	scopes := h.attrs
 	if len(event.scoped) > 0 {
 		scopes = make([][]slog.Attr, len(h.attrs))
@@ -408,31 +468,50 @@ func (h *Handler) Handle(
 			}
 		}
 	}
-	attrs := scopedAttrs(scopes, h.groups, raw)
+	attrsSlice := scopedAttrs(scopes, h.groups, rawSlice)
 
 	// Resolve LogValuer values while the event's context is still active.
 	// This mirrors slog's normal record processing semantics and avoids
 	// storing a LogValuer whose value might change later.
-	resolveAttrs(attrs)
+	resolveAttrs(attrsSlice)
+
+	// Store as a pool-backed pointer. When scopedAttrs returned the raw
+	// buffer untouched (the common case), reuse its pointer; when it rebuilt,
+	// wrap the rebuilt slice in a fresh pooled pointer.
+	var stored *[]slog.Attr
+	if raw != nil && sameBacking(*raw, attrsSlice) {
+		stored = raw
+		*stored = attrsSlice
+	} else {
+		stored = attrSlicePool.Get().(*[]slog.Attr)
+		*stored = attrsSlice
+	}
 
 	event.mu.Lock()
 
 	if event.ended {
 		event.mu.Unlock()
 		// The event is no longer collecting. Fall through to the wrapped
-		// handler so the record is still emitted rather than silently lost.
+		// handler, releasing any pooled attribute buffers we just built.
+		putAttrs(raw, stored)
 		return h.fallback.Handle(ctx, record)
 	}
 
-	event.events = append(event.events, eventRecord{
+	*event.events = append(*event.events, eventRecord{
 		time:    record.Time,
 		offset:  time.Since(event.start),
 		level:   record.Level,
 		message: record.Message,
-		attrs:   attrs,
+		attrs:   stored,
 	})
 
 	event.mu.Unlock()
+
+	// If scopedAttrs rebuilt the buffer, the pooled raw buffer is now
+	// orphaned; the stored attrs buffer is returned to the pool in End.
+	if raw != nil && stored != raw {
+		attrSlicePool.Put(raw)
+	}
 
 	return nil
 }
@@ -549,12 +628,35 @@ func scopedAttrs(attrs [][]slog.Attr, groups []string, record []slog.Attr) []slo
 	return append(slices.Clone(attrs[0]), record...)
 }
 
-func recordAttrs(record slog.Record) []slog.Attr {
-	attrs := make([]slog.Attr, 0, record.NumAttrs())
-	for attr := range record.Attrs {
-		attrs = append(attrs, attr)
+func recordAttrs(record slog.Record) *[]slog.Attr {
+	if record.NumAttrs() == 0 {
+		return nil
 	}
-	return attrs
+
+	p := attrSlicePool.Get().(*[]slog.Attr)
+	*p = (*p)[:0]
+	for attr := range record.Attrs {
+		*p = append(*p, attr)
+	}
+	return p
+}
+
+// sameBacking reports whether two non-empty slices share their backing array,
+// used to tell whether scopedAttrs returned the pooled raw buffer untouched.
+func sameBacking(a, b []slog.Attr) bool {
+	return len(a) > 0 && len(b) > 0 && &a[0] == &b[0]
+}
+
+// putAttrs returns pooled attribute buffers to the pool when an event no
+// longer collects, releasing raw (orphaned when scopedAttrs rebuilt) and the
+// stored attrs buffer without double-returning the same pointer.
+func putAttrs(raw, attrs *[]slog.Attr) {
+	if raw != nil && raw != attrs {
+		attrSlicePool.Put(raw)
+	}
+	if attrs != nil {
+		attrSlicePool.Put(attrs)
+	}
 }
 
 func attrsToAny(attrs []slog.Attr) []any {

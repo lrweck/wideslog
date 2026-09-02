@@ -46,13 +46,16 @@ func (e eventEntry) MarshalJSONTo(enc *jsontext.Encoder) error {
 		return err
 	}
 
-	for _, attr := range e.record.attrs {
-		attr.Value = attr.Value.Resolve()
-		if attr.Key == "" || reservedEventKey(attr.Key) {
-			continue
-		}
-		if err := writeSlogValue(enc, attr.Key, attr.Value); err != nil {
-			return err
+	events := e.record.attrs
+	if events != nil {
+		for _, attr := range *events {
+			attr.Value = attr.Value.Resolve()
+			if attr.Key == "" || reservedEventKey(attr.Key) {
+				continue
+			}
+			if err := writeSlogValue(enc, attr.Key, attr.Value); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -63,15 +66,15 @@ func (e eventEntry) MarshalJSONTo(enc *jsontext.Encoder) error {
 // MarshalJSONTo call writes the whole array, so the wrapped handler marshals
 // and flushes it as one block instead of per entry.
 type eventsArray struct {
-	entries []eventEntry
+	entries *[]eventEntry
 }
 
 func (v eventsArray) MarshalJSONTo(enc *jsontext.Encoder) error {
 	if err := enc.WriteToken(jsontext.BeginArray); err != nil {
 		return err
 	}
-	for i := range v.entries {
-		if err := v.entries[i].MarshalJSONTo(enc); err != nil {
+	for i := range *v.entries {
+		if err := (*v.entries)[i].MarshalJSONTo(enc); err != nil {
 			return err
 		}
 	}

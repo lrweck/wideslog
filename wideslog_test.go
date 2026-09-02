@@ -504,6 +504,70 @@ func TestConcurrentLogsToSameEvent(t *testing.T) {
 	assert.Len(t, seen, goroutines*logsPerGoroutine)
 }
 
+// TestPooledBuffersDoNotAlias stresses the sync.Pool reuse across many
+// concurrent events with varying step counts. Any aliasing bug in the pooled
+// event/entry/attr buffers corrupts an unrelated event's contents, which this
+// test catches by verifying every emitted event intact after heavy reuse.
+func TestPooledBuffersDoNotAlias(t *testing.T) {
+	var buf bytes.Buffer
+	logger := New(slog.NewJSONHandler(&buf, nil))
+
+	const workers = 24
+	const eventsPerWorker = 60
+
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for w := 0; w < workers; w++ {
+		w := w
+		go func() {
+			defer wg.Done()
+			for i := 0; i < eventsPerWorker; i++ {
+				ctx, ev := NewEvent(context.Background(), logger, fmt.Sprintf("op-%d-%d", w, i))
+				steps := (i % 20) + 1
+				for j := 0; j < steps; j++ {
+					logger.InfoContext(ctx, fmt.Sprintf("step-%d", j),
+						"w", w, "i", i, "j", j)
+				}
+				if i%5 == 0 {
+					ctx2, ev2 := NewEvent(context.Background(), logger, fmt.Sprintf("abt-%d-%d", w, i))
+					logger.InfoContext(ctx2, "to-abort", "w", w, "i", i)
+					ev2.Abort()
+				}
+				ev.End()
+			}
+		}()
+	}
+	wg.Wait()
+
+	lines := bytes.Split(bytes.TrimSpace(buf.Bytes()), []byte("\n"))
+	byMsg := make(map[string][]map[string]any)
+	for _, line := range lines {
+		var v map[string]any
+		require.NoError(t, json.Unmarshal(line, &v))
+		byMsg[v["msg"].(string)] = append(byMsg[v["msg"].(string)], v)
+	}
+
+	for w := 0; w < workers; w++ {
+		for i := 0; i < eventsPerWorker; i++ {
+			key := fmt.Sprintf("op-%d-%d", w, i)
+			evs, ok := byMsg[key]
+			require.Truef(t, ok, "missing event %s", key)
+			require.Len(t, evs, 1, "event %s emitted %d times", key, len(evs))
+			steps := (i % 20) + 1
+			children := evs[0]["events"].([]any)
+			require.Len(t, children, steps, "event %s has wrong step count", key)
+			for _, c := range children {
+				m := c.(map[string]any)
+				require.Equal(t, w, int(m["w"].(float64)), "event %s content corrupted", key)
+				require.Equal(t, i, int(m["i"].(float64)), "event %s content corrupted", key)
+			}
+			// Aborted events must not appear in output.
+			_, aborted := byMsg[fmt.Sprintf("abt-%d-%d", w, i)]
+			assert.False(t, aborted, "aborted event should not be emitted")
+		}
+	}
+}
+
 func TestAbort(t *testing.T) {
 	var buf bytes.Buffer
 	logger := New(slog.NewJSONHandler(&buf, nil))

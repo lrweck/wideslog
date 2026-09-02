@@ -33,7 +33,7 @@ func encodeJSON(t *testing.T, v any) string {
 
 func newEntry(msg string, level slog.Level, mode TimeMode, attrs ...slog.Attr) eventEntry {
 	return eventEntry{
-		record: eventRecord{level: level, message: msg, attrs: attrs},
+		record: eventRecord{level: level, message: msg, attrs: &attrs},
 		config: Config{TimeMode: mode, OffsetUnit: OffsetMicroseconds},
 	}
 }
@@ -56,7 +56,7 @@ func TestMarshalJSONExactSnapshot(t *testing.T) {
 			offset:  12_345_678 * time.Nanosecond,
 			level:   slog.LevelWarn,
 			message: `pay "ok" \done`,
-			attrs: []slog.Attr{
+			attrs: &[]slog.Attr{
 				slog.String("request_id", "req"),
 				slog.String(`a"b`, "x"),
 				slog.String("level", "reserved"),
@@ -179,7 +179,7 @@ func TestEventsArraySingleJSONBlock(t *testing.T) {
 		level:   slog.LevelInfo,
 		message: "step",
 	}
-	arr := eventsArray{entries: []eventEntry{
+	arr := eventsArray{entries: &[]eventEntry{
 		{record: base, config: Config{TimeMode: TimeOffset, OffsetUnit: OffsetMilliseconds}},
 		{record: base, config: Config{TimeMode: TimeNone}},
 	}}

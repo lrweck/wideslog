@@ -85,7 +85,7 @@ func TestMarshalJSONExactSnapshot(t *testing.T) {
 		`"dur":1500,"when":"2026-08-30T09:15:42.123456789Z","ok":true,` +
 		`"u":18446744073709551615,"dup":1,"dup":2,"chars":"a<b&c"}`
 
-	assert.JSONEq(t, encodeJSON(t, entry), want)
+	assert.Equal(t, want, encodeJSON(t, entry))
 }
 
 func TestMarshalJSONGroupValidated(t *testing.T) {

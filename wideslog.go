@@ -140,6 +140,9 @@ func NewEvent(
 	msg string,
 	options ...Option,
 ) (context.Context, *Event) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 
 	if logger == nil {
 		logger = slog.Default()
@@ -172,6 +175,9 @@ func NewEvent(
 
 // FromContext returns the Event stored in ctx, or nil when none is present.
 func FromContext(ctx context.Context) *Event {
+	if ctx == nil {
+		return nil
+	}
 
 	event, _ := ctx.Value(contextKey{}).(*Event)
 	return event
@@ -216,6 +222,8 @@ func (e *Event) End() {
 	e.ended = true
 
 	msg := e.msg
+	scoped := e.scoped
+	groups := e.groups
 
 	rootAttrs := make([]slog.Attr, 0, len(e.attrs)+3)
 	rootAttrs = append(rootAttrs, e.attrs...)
@@ -243,7 +251,7 @@ func (e *Event) End() {
 	)
 
 	record := slog.NewRecord(start, level, msg, 0)
-	record.AddAttrs(scopedAttrs(e.scoped, e.groups, rootAttrs)...)
+	record.AddAttrs(scopedAttrs(scoped, groups, rootAttrs)...)
 
 	_ = e.output.Handle(ctx, record)
 }
@@ -570,52 +578,5 @@ func resolveAttr(
 	return slog.Attr{
 		Key:   attr.Key,
 		Value: slog.GroupValue(resolved...),
-	}
-}
-
-func attrsToMap(attrs []slog.Attr) map[string]any {
-	values := make(map[string]any, len(attrs))
-
-	for _, attr := range attrs {
-		if attr.Key == "" {
-			continue
-		}
-
-		values[attr.Key] = valueToAny(attr.Value)
-	}
-
-	return values
-}
-
-func valueToAny(value slog.Value) any {
-	value = value.Resolve()
-
-	switch value.Kind() {
-	case slog.KindBool:
-		return value.Bool()
-
-	case slog.KindDuration:
-		return value.Duration()
-
-	case slog.KindFloat64:
-		return value.Float64()
-
-	case slog.KindInt64:
-		return value.Int64()
-
-	case slog.KindString:
-		return value.String()
-
-	case slog.KindTime:
-		return value.Time()
-
-	case slog.KindUint64:
-		return value.Uint64()
-
-	case slog.KindGroup:
-		return attrsToMap(value.Group())
-
-	default:
-		return value.Any()
 	}
 }

@@ -171,12 +171,55 @@ func writeEntryTime(enc *jsontext.Encoder, key string, t time.Time) error {
 }
 
 // writeAnyWithFormat marshals a value that is not a simple slog kind. It falls
-// back to encoding/json/v2, which writes the value into the encoder's own
-// available buffer without an intermediate allocation.
+// back to encoding/json/v2, writing directly into the encoder's own buffer
+// without an intermediate []byte allocation.
 func writeAnyWithFormat(enc *jsontext.Encoder, v any) error {
-	encoded, err := json.Marshal(v)
-	if err != nil {
-		return err
+	return json.MarshalEncode(enc, v)
+}
+
+func attrsToMap(attrs []slog.Attr) map[string]any {
+	values := make(map[string]any, len(attrs))
+
+	for _, attr := range attrs {
+		if attr.Key == "" {
+			continue
+		}
+
+		values[attr.Key] = valueToAny(attr.Value)
 	}
-	return enc.WriteValue(encoded)
+
+	return values
+}
+
+func valueToAny(value slog.Value) any {
+	value = value.Resolve()
+
+	switch value.Kind() {
+	case slog.KindBool:
+		return value.Bool()
+
+	case slog.KindDuration:
+		return value.Duration()
+
+	case slog.KindFloat64:
+		return value.Float64()
+
+	case slog.KindInt64:
+		return value.Int64()
+
+	case slog.KindString:
+		return value.String()
+
+	case slog.KindTime:
+		return value.Time()
+
+	case slog.KindUint64:
+		return value.Uint64()
+
+	case slog.KindGroup:
+		return attrsToMap(value.Group())
+
+	default:
+		return value.Any()
+	}
 }

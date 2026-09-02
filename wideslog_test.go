@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -315,12 +317,30 @@ func TestNewConfigDefaultsAndOptions(t *testing.T) {
 	assert.Equal(t, OffsetMilliseconds, configured.OffsetUnit)
 }
 
-func TestNilContextsAreSupported(t *testing.T) {
+func TestNilContextsSupported(t *testing.T) {
 	logger := New(slog.NewTextHandler(&bytes.Buffer{}, nil))
-	ctx, event := NewEvent(context.Background(), logger, "op")
+
+	// FromContext on a nil context is nil, like slog tolerating nil ctx.
+	assert.Nil(t, FromContext(nil))
+
+	// NewEvent(nil) falls back to a background context.
+	ctx, event := NewEvent(nil, logger, "op")
 	assert.NotNil(t, ctx)
 	assert.NotNil(t, event)
-	event.End()
+
+	// Logs through the returned context are still buffered.
+	var buf bytes.Buffer
+	jsonLogger := JSONHandler(&buf, nil)
+	ctx, ev := NewEvent(nil, jsonLogger, "op")
+	jsonLogger.InfoContext(ctx, "hello")
+	ev.End()
+	assert.Equal(t, "hello", step(t, decodeLog(t, &buf), 0)["msg"])
+
+	// A nil context cannot reach the event (slog normalizes it away), so the
+	// record falls through instead of panicking.
+	buf.Reset()
+	jsonLogger.InfoContext(nil, "stray")
+	assert.NotPanics(t, func() { jsonLogger.InfoContext(nil, "stray") })
 }
 
 func TestJSONHandler(t *testing.T) {
@@ -370,6 +390,43 @@ func TestEndIsIdempotentAndIgnoresLateAttributes(t *testing.T) {
 	root := decodeLog(t, &buf)
 	assert.Equal(t, "op", root["msg"])
 	assert.NotContains(t, root, "late")
+}
+
+func TestConcurrentLogsToSameEvent(t *testing.T) {
+	var buf bytes.Buffer
+	logger := New(slog.NewJSONHandler(&buf, nil))
+	ctx, event := NewEvent(context.Background(), logger, "op")
+
+	const goroutines = 16
+	const logsPerGoroutine = 25
+
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for g := 0; g < goroutines; g++ {
+		g := g
+		go func() {
+			defer wg.Done()
+			for i := 0; i < logsPerGoroutine; i++ {
+				logger.InfoContext(ctx, "step",
+					slog.Int("g", g), slog.Int("i", i))
+			}
+		}()
+	}
+	wg.Wait()
+	event.End()
+
+	root := decodeLog(t, &buf)
+	assert.EqualValues(t, goroutines*logsPerGoroutine, root["event_count"])
+	events := root["events"].([]any)
+	assert.Len(t, events, goroutines*logsPerGoroutine)
+
+	// Every step survived, regardless of interleaving.
+	seen := make(map[string]bool)
+	for _, e := range events {
+		m := e.(map[string]any)
+		seen[fmt.Sprintf("%v/%v", m["g"], m["i"])] = true
+	}
+	assert.Len(t, seen, goroutines*logsPerGoroutine)
 }
 
 func TestAbort(t *testing.T) {

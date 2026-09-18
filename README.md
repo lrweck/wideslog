@@ -171,6 +171,34 @@ func loggingMiddleware(logger *slog.Logger, next http.Handler) http.Handler {
 Each request receives its own event. The logger can be shared; request state is
 stored in the context and the `Event`.
 
+## OpenTelemetry
+
+When the context carries an OpenTelemetry span, `wideslog` stamps `trace_id`
+and `span_id` on the emitted record, so a log backend (Loki, CloudWatch, ...)
+links the line to its trace:
+
+```go
+ctx, span := tracer.Start(ctx, "checkout")
+defer span.End()
+
+ctx, event := wideslog.NewEvent(ctx, logger, "checkout")
+// ... steps ...
+event.End() // root record carries trace_id/span_id
+```
+
+Records logged outside an event are stamped too. The ids are captured when the
+event starts, so the wide event belongs to the span that was active then even
+if `End` runs after the span ended.
+
+Only `go.opentelemetry.io/otel/trace` is required (no SDK): without a
+configured OpenTelemetry provider there is no span, and the keys are simply
+absent — non-OpenTelemetry users pay nothing. The keys are exported as
+`wideslog.TraceIDKey` and `wideslog.SpanIDKey`.
+
+To ship logs over OTLP, wrap the output handler with the OpenTelemetry `slog`
+bridge (e.g. a fan-out of `slog.NewJSONHandler` and
+`otelslog.NewHandler`); `wideslog` stays a plain `slog.Handler`.
+
 ## When not to use it
 
 Use standard `slog` when each line must be independently searchable or when an

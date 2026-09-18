@@ -107,6 +107,7 @@ type Event struct {
 	ctx    context.Context
 	scoped [][]slog.Attr
 	groups []string
+	trace  []slog.Attr
 	msg    string
 	attrs  []slog.Attr
 	events []eventRecord
@@ -160,6 +161,9 @@ func NewEvent(
 		config: NewConfig(options...),
 		start:  time.Now(),
 		msg:    msg,
+		// Capture the span once: End may run after the span ended, and the
+		// wide event belongs to the span active when it started.
+		trace: traceAttrs(ctx),
 		// ponytail: cap 8 covers typical step counts in one alloc; larger
 		// events fall back to amortized growth, fine until proven otherwise.
 		events: make([]eventRecord, 0, 8),
@@ -224,9 +228,11 @@ func (e *Event) End() {
 	msg := e.msg
 	scoped := e.scoped
 	groups := e.groups
+	trace := e.trace
 
-	rootAttrs := make([]slog.Attr, 0, len(e.attrs)+3)
+	rootAttrs := make([]slog.Attr, 0, len(e.attrs)+len(trace)+3)
 	rootAttrs = append(rootAttrs, e.attrs...)
+	rootAttrs = append(rootAttrs, trace...)
 
 	events := e.events
 	e.events = nil
@@ -379,6 +385,11 @@ func (h *Handler) Handle(
 	event := FromContext(ctx)
 
 	if event == nil {
+		if attrs := traceAttrs(ctx); attrs != nil {
+			record = record.Clone()
+			record.AddAttrs(attrs...)
+		}
+
 		return h.fallback.Handle(ctx, record)
 	}
 

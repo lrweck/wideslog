@@ -111,6 +111,7 @@ type Event struct {
 	msg    string
 	attrs  []slog.Attr
 	events []eventRecord
+	level  *slog.Level
 	ended  bool
 }
 
@@ -202,6 +203,23 @@ func (e *Event) Add(attrs ...slog.Attr) {
 	e.attrs = append(e.attrs, attrs...)
 }
 
+// SetLevel overrides the level of the final wide event. By default the
+// root uses the highest level found in the buffered steps (Info when there
+// are none); call this when the level is a property of the operation's
+// outcome rather than of anything logged — an HTTP middleware maps the
+// status code (2xx→Info, 4xx→Warn, 5xx→Error), for example. No-op after End.
+func (e *Event) SetLevel(level slog.Level) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if e.ended {
+		return
+	}
+
+	over := level
+	e.level = &over
+}
+
 // End emits the accumulated wide event, using the context captured at
 // NewEvent.
 //
@@ -248,6 +266,9 @@ func (e *Event) End() {
 	e.mu.Unlock()
 
 	level := maxEventLevel(events)
+	if e.level != nil {
+		level = *e.level
+	}
 	if !e.output.Enabled(ctx, level) {
 		return
 	}

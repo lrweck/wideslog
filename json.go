@@ -84,6 +84,18 @@ func (v eventsArray) MarshalJSONTo(enc *jsontext.Encoder) error {
 	return enc.WriteToken(jsontext.EndArray)
 }
 
+// String renders the array as its JSON. Consumers that format values with
+// fmt instead of a slog JSON handler — the OpenTelemetry log bridge, for
+// example — would otherwise print the Go struct dump ({entries:[...]}).
+func (v eventsArray) String() string {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return ""
+	}
+
+	return string(b)
+}
+
 // writeSlogValue emits an object member `key: value` where value is a slog
 // value. Writing the key as a jsontext String token lets the encoder manage
 // the name/value separator and member commas for us.

@@ -45,6 +45,12 @@ func (e eventEntry) MarshalJSONTo(enc *jsontext.Encoder) error {
 	if err := writeEntryString(enc, "msg", e.record.message); err != nil {
 		return err
 	}
+	// trace_id lives on the root; a step carries only the span it ran in.
+	if e.record.spanID != "" {
+		if err := writeEntryString(enc, SpanIDKey, e.record.spanID); err != nil {
+			return err
+		}
+	}
 
 	for _, attr := range e.record.attrs {
 		attr.Value = attr.Value.Resolve()

@@ -188,7 +188,9 @@ event.End() // root record carries trace_id/span_id
 
 Records logged outside an event are stamped too. The ids are captured when the
 event starts, so the wide event belongs to the span that was active then even
-if `End` runs after the span ended.
+if `End` runs after the span ended. The root record carries `trace_id` and
+`span_id`; each buffered step carries only `span_id`, because a step can run in
+a different span of the same trace (a nested DB call, for example).
 
 Only `go.opentelemetry.io/otel/trace` is required (no SDK): without a
 configured OpenTelemetry provider there is no span, and the keys are simply

@@ -33,6 +33,27 @@ func TestEventRootCarriesTraceIDs(t *testing.T) {
 	assert.Equal(t, "1112131415161718", root[SpanIDKey])
 }
 
+func TestEventStepCarriesSpanIDOnly(t *testing.T) {
+	var buf bytes.Buffer
+	logger := JSONHandler(&buf, nil)
+
+	ctx, event := NewEvent(spanContext(), logger, "checkout")
+	child := trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID:    trace.TraceID{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10},
+		SpanID:     trace.SpanID{0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28},
+		TraceFlags: trace.FlagsSampled,
+	})
+	logger.InfoContext(trace.ContextWithSpanContext(ctx, child), "db call")
+	event.End()
+
+	root := decodeLog(t, &buf)
+	assert.Equal(t, "0102030405060708090a0b0c0d0e0f10", root[TraceIDKey])
+
+	entry := step(t, root, 0)
+	assert.Equal(t, "2122232425262728", entry[SpanIDKey], "step carries the span it ran in")
+	assert.NotContains(t, entry, TraceIDKey, "trace_id stays on the root")
+}
+
 func TestEventWithoutSpanHasNoTraceIDs(t *testing.T) {
 	var buf bytes.Buffer
 	logger := JSONHandler(&buf, nil)

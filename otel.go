@@ -36,3 +36,19 @@ func traceAttrs(ctx context.Context) []slog.Attr {
 		slog.String(SpanIDKey, sc.SpanID().String()),
 	}
 }
+
+// spanID returns the id of the span carried by ctx ("" when none). It is
+// what individual events carry: the trace_id lives on the root only, but a
+// step can belong to a different span (a nested DB call, for example).
+func spanID(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+
+	sc := trace.SpanContextFromContext(ctx)
+	if !sc.IsValid() {
+		return ""
+	}
+
+	return sc.SpanID().String()
+}

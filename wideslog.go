@@ -119,6 +119,7 @@ type eventRecord struct {
 	offset  time.Duration
 	level   slog.Level
 	message string
+	spanID  string
 	attrs   []slog.Attr
 }
 
@@ -429,6 +430,7 @@ func (h *Handler) Handle(
 		offset:  time.Since(event.start),
 		level:   record.Level,
 		message: record.Message,
+		spanID:  spanID(ctx),
 		attrs:   attrs,
 	})
 
